@@ -1,0 +1,22 @@
+# Auto detect text files and normalize to LF
+* text=auto
+
+# TypeScript / JavaScript
+*.ts text
+*.js text
+
+# Configuration
+*.json text
+
+# Documentation
+*.md text
+*.txt text
+
+# Git files
+.gitignore text
+.gitattributes text
+
+# Node artifacts (just in case they ever get tracked)
+*.cjs text
+*.cts text
+*.d.ts text
