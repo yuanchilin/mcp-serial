@@ -1,6 +1,6 @@
 {
   "name": "mcp-serial",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "MCP Serial Terminal server for MoterSoc - persistent serial port communication with Web monitor",
   "private": true,
   "type": "module",
@@ -11,7 +11,8 @@
     "build"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "tsc && node -e \"fs.chmodSync('build/index.js', 0o755); fs.cpSync('src/viewer.html', 'build/viewer.html')\"",
+    "start": "node build/index.js",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
@@ -23,5 +24,8 @@
   "devDependencies": {
     "@types/node": "^20.11.24",
     "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

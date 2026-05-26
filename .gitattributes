@@ -1,12 +1,29 @@
 # Auto detect text files and normalize to LF
 * text=auto
 
+# Shell scripts — keep LF + executable on checkout
+*.sh text eol=lf
+*.ps1 text eol=lf
+
 # TypeScript / JavaScript
 *.ts text
 *.js text
+*.cts text
+*.cjs text
+*.mjs text
+*.d.ts text
+
+# Web
+*.html text
+*.css text
 
 # Configuration
 *.json text
+*.yml text
+*.yaml text
+*.toml text
+*.ini text
+.editorconfig text
 
 # Documentation
 *.md text
@@ -16,7 +33,8 @@
 .gitignore text
 .gitattributes text
 
-# Node artifacts (just in case they ever get tracked)
-*.cjs text
-*.cts text
-*.d.ts text
+# Binary files — keep as-is
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

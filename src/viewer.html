@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>串口实时终端</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#1a1a2e;
+  color:#e0e0e0;
+  font-family:Consolas,Monaco,'Courier New',monospace;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+.header{
+  background:#16213e;
+  padding:10px 16px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  border-bottom:1px solid #0f3460;
+  flex-shrink:0;
+}
+.header .title{font-size:15px;font-weight:bold;color:#e94560}
+.header .status{font-size:12px;padding:3px 10px;border-radius:12px;background:#333}
+.header .status.connected{background:#1b5e20;color:#81c784}
+.header .status.disconnected{background:#4a1414;color:#ef9a9a}
+.header .info{font-size:11px;color:#888;margin-left:auto}
+.controls{
+  background:#16213e;
+  padding:6px 12px;
+  display:flex;
+  gap:6px;
+  flex-shrink:0;
+  border-bottom:1px solid #0f3460;
+  flex-wrap:wrap;
+  align-items:center;
+}
+.controls button{
+  background:#0f3460;
+  color:#e0e0e0;
+  border:1px solid #1a508b;
+  padding:4px 12px;
+  border-radius:4px;
+  cursor:pointer;
+  font-size:11px;
+  font-family:inherit;
+}
+.controls button:hover{background:#1a508b}
+.controls button.danger{border-color:#e94560;color:#e94560}
+.controls button.danger:hover{background:#e94560;color:#fff}
+.controls .byte-count{font-size:11px;color:#888;margin-left:auto}
+.output{
+  flex:1;
+  overflow-y:auto;
+  padding:10px 14px;
+  background:#0a0a1a;
+  font-size:13px;
+  line-height:1.6;
+  white-space:pre-wrap;
+  word-break:break-all;
+}
+.output .timestamp{color:#555;font-size:10px;margin-right:8px}
+.output .error{color:#e94560}
+.output .info-msg{color:#f0a500}
+.output .sent-cmd{color:#4fc3f7}
+.output::-webkit-scrollbar{width:8px}
+.output::-webkit-scrollbar-track{background:#0a0a1a}
+.output::-webkit-scrollbar-thumb{background:#0f3460;border-radius:4px}
+.output::-webkit-scrollbar-thumb:hover{background:#1a508b}
+.empty-state{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  height:100%;
+  color:#555;
+  font-size:14px;
+  flex-direction:column;
+  gap:8px;
+}
+.input-bar{
+  background:#16213e;
+  padding:8px 12px;
+  display:flex;
+  gap:8px;
+  border-top:1px solid #0f3460;
+  flex-shrink:0;
+  align-items:center;
+}
+.input-bar input[type="text"]{
+  flex:1;
+  background:#0a0a1a;
+  color:#e0e0e0;
+  border:1px solid #0f3460;
+  padding:6px 10px;
+  border-radius:4px;
+  font-family:Consolas,Monaco,'Courier New',monospace;
+  font-size:13px;
+  outline:none;
+}
+.input-bar input[type="text"]:focus{border-color:#e94560}
+.input-bar select{
+  background:#0f3460;
+  color:#e0e0e0;
+  border:1px solid #1a508b;
+  padding:4px 8px;
+  border-radius:4px;
+  font-size:11px;
+  font-family:inherit;
+  cursor:pointer;
+}
+.input-bar button.send-btn{
+  background:#e94560;
+  color:#fff;
+  border:none;
+  padding:6px 16px;
+  border-radius:4px;
+  cursor:pointer;
+  font-size:12px;
+  font-family:inherit;
+  font-weight:bold;
+}
+.input-bar button.send-btn:hover{background:#ff6b81}
+.input-bar button.send-btn:disabled{background:#555;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="title">🔌 串口实时终端</span>
+  <span id="status" class="status disconnected">未连接</span>
+  <span class="info" id="portInfo"></span>
+</div>
+<div class="controls">
+  <button onclick="clearOutput()">🧹 清屏</button>
+  <button onclick="toggleScroll()" id="scrollBtn">🔽 自动滚动</button>
+  <button class="danger" onclick="disconnectSSE()">⛔ 断开 SSE</button>
+  <span class="byte-count" id="byteCount">0 bytes</span>
+</div>
+<div class="output" id="output">
+  <div class="empty-state">
+    <span>等待串口数据...</span>
+    <small>请确保 MCP 已打开串口 (serial_start 或 AUTO_CONNECT)</small>
+  </div>
+</div>
+<div class="input-bar">
+  <input type="text" id="cmdInput" placeholder="输入要发送的命令..."
+         onkeydown="if(event.key==='Enter')sendCommand()" />
+  <select id="lineEnding">
+    <option value="&#10;">\n (LF)</option>
+    <option value="&#13;&#10;">\r\n (CRLF)</option>
+    <option value="&#13;">\r (CR)</option>
+    <option value="">无</option>
+  </select>
+  <button class="send-btn" id="sendBtn" onclick="sendCommand()">发送</button>
+</div>
+
+<script>
+const BASE_URL = window.location.origin;
+let eventSource = null;
+let autoScroll = true;
+let totalBytes = 0;
+let firstData = true;
+let lineBuffer = "";
+
+function init(){connectSSE();}
+
+function connectSSE(){
+  if(eventSource) eventSource.close();
+  eventSource = new EventSource(BASE_URL + '/events');
+  eventSource.onopen = () => {
+    document.getElementById('status').textContent = '监听中';
+    document.getElementById('status').className = 'status connected';
+    appendLine('--- SSE 已连接，等待串口数据 ---', 'info-msg');
+  };
+  eventSource.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if(firstData){
+        clearOutput();
+        firstData = false;
+      }
+      appendText(msg.text);
+      totalBytes += msg.text.length;
+      updateByteCount();
+    } catch(e){
+      appendLine('解析错误: ' + e.message, 'error');
+    }
+  };
+  eventSource.onerror = () => {
+    document.getElementById('status').textContent = '连接断开';
+    document.getElementById('status').className = 'status disconnected';
+    appendLine('--- SSE 连接断开，3秒后重连 ---', 'error');
+    if(eventSource){
+      eventSource.close();
+      eventSource = null;
+    }
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+function disconnectSSE(){
+  if(eventSource){
+    eventSource.close();
+    eventSource = null;
+  }
+  document.getElementById('status').textContent = '已手动断开';
+  document.getElementById('status').className = 'status disconnected';
+  appendLine('--- SSE 已手动断开 ---', 'info-msg');
+}
+
+async function sendCommand(){
+  const input = document.getElementById('cmdInput');
+  const cmd = input.value.trim();
+  if(!cmd) return;
+  const lineEnding = document.getElementById('lineEnding').value;
+  const displayLE = lineEnding
+    ? ' [' + lineEnding.replace(/\n/g,'\\n').replace(/\r/g,'\\r') + ']'
+    : '';
+  appendLine('> ' + cmd + displayLE, 'sent-cmd');
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+  input.disabled = true;
+  try {
+    const resp = await fetch(BASE_URL + '/send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd, lineEnding: lineEnding}),
+    });
+    if(!resp.ok){
+      const err = await resp.json();
+      appendLine('发送失败: ' + (err.error || '未知错误'), 'error');
+    }
+  } catch(e){
+    appendLine('发送失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    input.disabled = false;
+    input.value = '';
+    input.focus();
+  }
+}
+
+function appendText(text){
+  const output = document.getElementById('output');
+  const emptyState = output.querySelector('.empty-state');
+  if(emptyState) output.innerHTML = '';
+  const combined = lineBuffer + text;
+  const parts = combined.split('\n');
+  for(let i = 0; i < parts.length - 1; i++){
+    const line = parts[i].replace(/\r$/, '');
+    const now = new Date();
+    const ts = now.toTimeString().slice(0,8) + '.' + String(now.getMilliseconds()).padStart(3,'0');
+    const div = document.createElement('div');
+    div.className = 'line';
+    div.innerHTML = '<span class="timestamp">[' + ts + ']</span>' + escapeHtml(line);
+    output.appendChild(div);
+  }
+  lineBuffer = parts[parts.length - 1];
+  if(lineBuffer){
+    let partialElem = document.getElementById('partial-line');
+    if(!partialElem){
+      partialElem = document.createElement('div');
+      partialElem.id = 'partial-line';
+      partialElem.className = 'line partial';
+      output.appendChild(partialElem);
+    }
+    partialElem.textContent = lineBuffer;
+  } else {
+    const partialElem = document.getElementById('partial-line');
+    if(partialElem) partialElem.remove();
+  }
+  if(autoScroll) output.scrollTop = output.scrollHeight;
+}
+
+function appendLine(text, cls){
+  const output = document.getElementById('output');
+  const emptyState = output.querySelector('.empty-state');
+  if(emptyState) output.innerHTML = '';
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8) + '.' + String(now.getMilliseconds()).padStart(3,'0');
+  const div = document.createElement('div');
+  div.className = 'line' + (cls ? ' ' + cls : '');
+  div.innerHTML = '<span class="timestamp">[' + ts + ']</span>' + escapeHtml(text);
+  output.appendChild(div);
+  if(autoScroll) output.scrollTop = output.scrollHeight;
+}
+
+function clearOutput(){
+  const output = document.getElementById('output');
+  output.innerHTML = '';
+  totalBytes = 0;
+  lineBuffer = '';
+  updateByteCount();
+}
+
+function toggleScroll(){
+  autoScroll = !autoScroll;
+  document.getElementById('scrollBtn').textContent = autoScroll ? '🔽 自动滚动' : '📌 暂停滚动';
+}
+
+function updateByteCount(){
+  const el = document.getElementById('byteCount');
+  if(totalBytes >= 1048576){
+    el.textContent = (totalBytes/1048576).toFixed(1) + ' MB';
+  } else if(totalBytes >= 1024){
+    el.textContent = (totalBytes/1024).toFixed(1) + ' KB';
+  } else {
+    el.textContent = totalBytes + ' bytes';
+  }
+}
+
+function escapeHtml(text){
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatUptime(ms){
+  const s = Math.floor(ms/1000);
+  if(s < 60) return s + 's';
+  const m = Math.floor(s/60);
+  if(m < 60) return m + 'm ' + (s%60) + 's';
+  const h = Math.floor(m/60);
+  return h + 'h ' + (m%60) + 'm ' + (s%60) + 's';
+}
+
+function formatBytes(bytes){
+  if(bytes < 1024) return bytes + ' B';
+  if(bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(2) + ' MB';
+}
+
+setInterval(async () => {
+  try {
+    const resp = await fetch(BASE_URL + '/status');
+    const status = await resp.json();
+    const infoEl = document.getElementById('portInfo');
+    if(status.connected){
+      infoEl.textContent = status.port + ' @ ' + status.baudRate
+        + ' | ' + formatBytes(status.stats.totalBytes)
+        + ' | 运行: ' + formatUptime(status.uptimeMs);
+    } else {
+      infoEl.textContent = status.stats ? '已接收: ' + formatBytes(status.stats.totalBytes) : '';
+    }
+  } catch(e){}
+}, 3000);
+
+init();
+</script>
+</body>
+</html>
