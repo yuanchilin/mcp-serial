@@ -4,6 +4,17 @@ import { SerialPort } from "serialport";
 import type { ServerResponse } from "http";
 
 // ============================================================================
+// SSE 客户端信息
+// ============================================================================
+
+interface ClientInfo {
+  res: ServerResponse;
+  connectedAt: number;
+  name: string;
+  ip: string;
+}
+
+// ============================================================================
 // 持久化串口监视器 - 保持串口打开，持续接收数据
 // ============================================================================
 
@@ -13,7 +24,8 @@ export class SerialMonitor {
   baudRate = 0;
   startedAt: Date | null = null;
   buffer: RingBuffer;
-  sseClients = new Set<ServerResponse>();
+  sseClients = new Map<string, ClientInfo>();
+  controllerClientId: string | null = null;
 
   constructor(bufferMaxSize: number) {
     this.buffer = new RingBuffer(bufferMaxSize);
@@ -26,6 +38,12 @@ export class SerialMonitor {
 
   /** 获取串口状态 */
   getStatus(): SerialStatus {
+    const clients = Array.from(this.sseClients.entries()).map(([id, info]) => ({
+      clientId: id,
+      name: info.name,
+      ip: info.ip,
+      isController: id === this.controllerClientId,
+    }));
     return {
       connected: this.isActive(),
       port: this.port,
@@ -33,7 +51,15 @@ export class SerialMonitor {
       startedAt: this.startedAt?.toISOString() ?? null,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt.getTime() : 0,
       stats: this.buffer.getStats(),
+      clientCount: this.sseClients.size,
+      controllerClientId: this.controllerClientId,
+      clients,
     };
+  }
+
+  /** 判断是否为控制端 */
+  isController(clientId: string): boolean {
+    return this.controllerClientId === clientId;
   }
 
   /** 打开串口并开始监听 */
@@ -64,6 +90,8 @@ export class SerialMonitor {
         console.error("[SerialMonitor] 串口已关闭");
         this.broadcastSSE("\n[串口已关闭]\n");
         this.serialPort = null;
+        this.startedAt = null;
+        this.broadcastStatus();
       });
 
       sp.open((err) => {
@@ -76,6 +104,7 @@ export class SerialMonitor {
         this.baudRate = baudRate;
         this.startedAt = new Date();
         console.error(`[SerialMonitor] 串口已打开: ${port} @ ${baudRate} baud`);
+        this.broadcastStatus();
         resolve();
       });
     });
@@ -90,6 +119,7 @@ export class SerialMonitor {
       sp.close(() => {
         this.serialPort = null;
         this.startedAt = null;
+        this.broadcastStatus();
         console.error("[SerialMonitor] 串口已停止");
         resolve();
       });
@@ -177,16 +207,103 @@ export class SerialMonitor {
 
   // ---- SSE 客户端管理 ----
 
-  addSSEClient(res: ServerResponse): void {
-    this.sseClients.add(res);
-    console.error(`[SSE] 客户端已连接，当前 ${this.sseClients.size} 个客户端`);
+  addClient(clientId: string, res: ServerResponse, name: string, ip: string): void {
+    this.sseClients.set(clientId, { res, connectedAt: Date.now(), name, ip });
+    // 首个客户端自动成为控制端
+    if (!this.controllerClientId) {
+      this.controllerClientId = clientId;
+    }
+    console.error(`[SSE] 客户端 ${name}(${ip}) 已连接，当前 ${this.sseClients.size} 个客户端`);
   }
 
-  removeSSEClient(res: ServerResponse): void {
-    this.sseClients.delete(res);
-    console.error(`[SSE] 客户端已断开，当前 ${this.sseClients.size} 个客户端`);
+  removeClient(clientId: string): void {
+    this.sseClients.delete(clientId);
+    console.error(`[SSE] 客户端 ${clientId.slice(0, 8)} 已断开，当前 ${this.sseClients.size} 个客户端`);
+
+    // 如果移除的是当前控制端，自动提升最老客户端
+    if (this.controllerClientId === clientId) {
+      const oldest = this.getOldestClient();
+      if (oldest) {
+        this.controllerClientId = oldest;
+        this.broadcastControlEvent("control-taken", {
+          newController: oldest,
+          reason: "控制端已断开，自动提升",
+        });
+        console.error(`[SSE] 控制端已自动提升为 ${oldest.slice(0, 8)}`);
+      } else {
+        this.controllerClientId = null;
+      }
+      this.broadcastStatus();
+    }
   }
 
+  /** 设置控制端 */
+  setController(clientId: string): boolean {
+    if (!this.sseClients.has(clientId)) return false;
+    const oldController = this.controllerClientId;
+    this.controllerClientId = clientId;
+    this.broadcastControlEvent("control-taken", {
+      newController: clientId,
+      oldController: oldController,
+    });
+    this.broadcastStatus();
+    return true;
+  }
+
+  /** 获取最老的客户端 ID */
+  getOldestClient(): string | null {
+    let oldest = null;
+    let oldestTime = Infinity;
+    for (const [id, info] of this.sseClients) {
+      if (info.connectedAt < oldestTime) {
+        oldestTime = info.connectedAt;
+        oldest = id;
+      }
+    }
+    return oldest;
+  }
+
+  /** 向指定客户端发送事件 */
+  sendToClient(clientId: string, eventName: string, data: unknown): void {
+    const client = this.sseClients.get(clientId);
+    if (!client) return;
+    try {
+      const payload = JSON.stringify(data);
+      client.res.write(`event: ${eventName}\ndata: ${payload}\n\n`);
+    } catch {
+      this.sseClients.delete(clientId);
+    }
+  }
+
+  /** 广播控制事件给所有客户端 */
+  broadcastControlEvent(eventName: string, data: unknown): void {
+    if (this.sseClients.size === 0) return;
+    const payload = JSON.stringify(data);
+    const eventData = `event: ${eventName}\ndata: ${payload}\n\n`;
+    for (const [, client] of this.sseClients) {
+      try {
+        client.res.write(eventData);
+      } catch {
+        // dead client, will be cleaned up on close
+      }
+    }
+  }
+
+  /** 广播结构化状态变更事件给所有 SSE 客户端 */
+  broadcastStatus(): void {
+    if (this.sseClients.size === 0) return;
+    const payload = JSON.stringify(this.getStatus());
+    const eventData = `event: status\ndata: ${payload}\n\n`;
+    for (const [, client] of this.sseClients) {
+      try {
+        client.res.write(eventData);
+      } catch {
+        // dead client
+      }
+    }
+  }
+
+  /** 广播文本数据给所有 SSE 客户端 */
   broadcastSSE(data: string): void {
     if (this.sseClients.size === 0) return;
 
@@ -195,11 +312,11 @@ export class SerialMonitor {
       text: data,
     })}\n\n`;
 
-    for (const client of this.sseClients) {
+    for (const [, client] of this.sseClients) {
       try {
-        client.write(eventData);
+        client.res.write(eventData);
       } catch {
-        this.sseClients.delete(client);
+        // dead client
       }
     }
   }

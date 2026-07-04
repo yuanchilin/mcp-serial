@@ -17,6 +17,14 @@ export interface BufferStats {
   bufferMaxSize: number;
 }
 
+/** SSE 客户端信息 */
+export interface ClientBrief {
+  clientId: string;
+  name: string;
+  ip: string;
+  isController: boolean;
+}
+
 /** 串口连接状态 */
 export interface SerialStatus {
   connected: boolean;
@@ -25,6 +33,9 @@ export interface SerialStatus {
   startedAt: string | null;
   uptimeMs: number;
   stats: BufferStats;
+  clientCount: number;
+  controllerClientId: string | null;
+  clients: ClientBrief[];
 }
 
 /** 从偏移量读取的结果 */
@@ -37,6 +48,12 @@ export interface ReadResult {
 export interface SendRequestBody {
   command: string;
   lineEnding?: string;
+}
+
+/** HTTP POST /connect 请求体 */
+export interface ConnectRequestBody {
+  port: string;
+  baudRate: number;
 }
 
 /** SSE 事件数据 */

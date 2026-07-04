@@ -1,6 +1,6 @@
 {
   "name": "@yuanchilin/mcp-serial",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "MCP Serial Terminal server for MoterSoc - persistent serial port communication with Web monitor",
   "private": false,
   "type": "module",
@@ -30,7 +30,7 @@
     "url": "git+https://github.com/yuanchilin/mcp-serial.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "access": "public"
   },
   "engines": {

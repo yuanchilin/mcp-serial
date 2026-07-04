@@ -4,16 +4,17 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { SerialPort } from "serialport";
 import { SerialMonitor } from "./serial-monitor.js";
-import { startWebServer } from "./web-server.js";
+import { startWebServer, openBrowser } from "./web-server.js";
 
 const SERIAL_PORT_ENV = process.env.SERIAL_PORT || "COM3";
 const SERIAL_BAUDRATE_ENV = parseInt(process.env.SERIAL_BAUDRATE || "115200", 10);
 const BUFFER_MAX_SIZE = parseInt(process.env.SERIAL_BUFFER_SIZE || "1048576", 10);
 const WEB_PORT = parseInt(process.env.WEB_PORT || "9721", 10);
 const AUTO_CONNECT = process.env.SERIAL_AUTO_CONNECT === "true";
+const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN !== "false"; // 默认 true
 
 const monitor = new SerialMonitor(BUFFER_MAX_SIZE);
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 
 const server = new Server({ name: "serial-terminal", version: APP_VERSION }, { capabilities: { tools: {} } });
 
@@ -74,6 +75,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "serial_clear_buffer",
         description: "清空串口数据缓冲区",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "open_web_monitor",
+        description: "在 VS Code 内置浏览器（Simple Browser）中打开串口 Web 实时监视器。监视器地址: http://localhost:PORT",
         inputSchema: { type: "object", properties: {} },
       },
     ],
@@ -143,7 +149,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const le = String(args.lineEnding || "\n");
       try {
         const resp = await monitor.send(cmd, le, timeout);
-        return { content: [{ type: "text", text: `响应 (${resp.length} 字符):\n${resp}` }] };
+        return { content: [{ type: "text", text: resp }] };
       } catch (error) {
         return { content: [{ type: "text", text: `错误: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
       }
@@ -153,6 +159,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const stats = monitor.buffer.getStats();
       monitor.buffer.clear();
       return { content: [{ type: "text", text: `✅ 已清空 (之前 ${formatBytes(stats.totalBytes)})` }] };
+    }
+
+    case "open_web_monitor": {
+      const url = `http://localhost:${WEB_PORT}`;
+      const opened = openBrowser(url);
+      if (opened) {
+        return { content: [{ type: "text", text: `✅ 已在 VS Code 内置浏览器中打开: ${url}` }] };
+      }
+      return { content: [{ type: "text", text: `🔗 Web 监视器已在运行: ${url}（浏览器已打开，请直接使用）` }] };
     }
 
     default:
@@ -183,7 +198,7 @@ function formatBytes(bytes: number): string {
 // 主函数
 // ============================================================================
 async function main(): Promise<void> {
-  const webServer = startWebServer(WEB_PORT, monitor);
+  const webServer = startWebServer(WEB_PORT, monitor, WEB_AUTO_OPEN);
 
   if (AUTO_CONNECT) {
     console.error(`[AutoConnect] → ${SERIAL_PORT_ENV} @ ${SERIAL_BAUDRATE_ENV} baud`);
@@ -200,6 +215,7 @@ async function main(): Promise<void> {
   console.error(`[MCP] Serial Terminal v${APP_VERSION}`);
   console.error(`[MCP] Web 终端: http://localhost:${WEB_PORT}`);
   console.error(`[MCP] 自动连接: ${AUTO_CONNECT ? "启用" : "禁用"}`);
+  console.error(`[MCP] Web 自动打开: ${WEB_AUTO_OPEN ? "启用" : "禁用"}`);
 
   const shutdown = async () => {
     console.error("[MCP] 正在关闭...");

@@ -24,20 +24,34 @@ body{
   flex-shrink:0;
 }
 .header .title{font-size:15px;font-weight:bold;color:#e94560}
-.header .status{font-size:12px;padding:3px 10px;border-radius:12px;background:#333}
-.header .status.connected{background:#1b5e20;color:#81c784}
-.header .status.disconnected{background:#4a1414;color:#ef9a9a}
-.header .info{font-size:11px;color:#888;margin-left:auto}
+.header .role-badge{font-size:12px;padding:3px 10px;border-radius:12px;background:#333}
+.header .role-badge.controller{background:#1b5e20;color:#81c784}
+.header .role-badge.monitor{background:#4a1414;color:#ef9a9a}
+.header .info{font-size:11px;color:#888;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .controls{
   background:#16213e;
   padding:6px 12px;
   display:flex;
-  gap:6px;
+  gap:8px;
+  align-items:center;
   flex-shrink:0;
   border-bottom:1px solid #0f3460;
   flex-wrap:wrap;
-  align-items:center;
 }
+.control-label{font-size:11px;color:#888;white-space:nowrap}
+.controls select{
+  background:#0f3460;
+  color:#e0e0e0;
+  border:1px solid #1a508b;
+  padding:4px 8px;
+  border-radius:4px;
+  cursor:pointer;
+  font-size:12px;
+  font-family:inherit;
+  max-width:200px;
+}
+.controls.collapsed .hideable{display:none}
+.controls select:disabled{opacity:0.5;cursor:not-allowed}
 .controls button{
   background:#0f3460;
   color:#e0e0e0;
@@ -49,9 +63,79 @@ body{
   font-family:inherit;
 }
 .controls button:hover{background:#1a508b}
-.controls button.danger{border-color:#e94560;color:#e94560}
-.controls button.danger:hover{background:#e94560;color:#fff}
-.controls .byte-count{font-size:11px;color:#888;margin-left:auto}
+.controls button:disabled{background:#555;cursor:not-allowed;color:#999}
+.connect-btn{background:#1b5e20;color:#81c784;border-color:#2e7d32;font-weight:bold}
+.connect-btn:hover{background:#2e7d32;color:#c8e6c9}
+.disconnect-btn{background:#4a1414;color:#ef9a9a;border-color:#e94560;font-weight:bold}
+.disconnect-btn:hover{background:#e94560;color:#fff}
+.refresh-btn{padding:4px 8px;font-size:14px;line-height:1}
+.request-btn{background:#3e2723;color:#ffcc02;border-color:#5d4037;font-weight:bold}
+.request-btn:hover{background:#5d4037;color:#ffe082}
+.force-btn{background:#4a1414;color:#ff8a80;border-color:#e94560;font-weight:bold}
+.force-btn:hover{background:#e94560;color:#fff}
+.status-strip{
+  font-size:11px;
+  padding:2px 10px;
+  border-radius:3px;
+  cursor:pointer;
+  position:relative;
+  white-space:nowrap;
+  user-select:none;
+}
+.status-strip:hover{background:rgba(255,255,255,0.05)}
+.status-strip.connected{color:#81c784}
+.status-strip.disconnected{color:#888}
+/* 客户端下拉列表 */
+.client-dropdown{
+  display:none;
+  position:absolute;
+  top:100%;
+  left:0;
+  margin-top:4px;
+  background:#16213e;
+  border:1px solid #0f3460;
+  border-radius:6px;
+  padding:6px 0;
+  z-index:999;
+  min-width:220px;
+  box-shadow:0 4px 16px rgba(0,0,0,0.5);
+}
+.client-dropdown.show{display:block}
+.client-dropdown .client-item{
+  padding:5px 14px;
+  font-size:11px;
+  color:#c0c0c0;
+  white-space:nowrap;
+}
+.client-dropdown .client-item.controller{color:#81c784}
+.client-dropdown .client-item .c-ip{color:#666;margin-left:8px;font-size:10px}
+.byte-count{font-size:11px;color:#888;white-space:nowrap}
+/* Toast */
+.toast-container{
+  position:fixed;top:12px;right:12px;z-index:9999;
+  display:flex;flex-direction:column;gap:8px;max-width:360px;
+}
+.toast{
+  background:#1a237e;
+  color:#e0e0e0;
+  padding:12px 16px;
+  border-radius:8px;
+  font-size:12px;
+  border:1px solid #283593;
+  animation:slideIn 0.3s ease;
+}
+.toast.warn{background:#3e2723;border-color:#5d4037}
+.toast .toast-msg{line-height:1.5}
+.toast .toast-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+.toast .toast-actions button{
+  background:#283593;color:#e0e0e0;border:1px solid #3949ab;
+  padding:3px 12px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;
+}
+.toast .toast-actions button:hover{background:#3949ab}
+.toast .toast-actions button.danger{background:#4a1414;border-color:#e94560;color:#ef9a9a}
+.toast .toast-actions button.danger:hover{background:#e94560;color:#fff}
+.toast .toast-timer{font-size:10px;color:#888;margin-top:4px}
+@keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
 .output{
   flex:1;
   overflow-y:auto;
@@ -65,6 +149,7 @@ body{
 .output .timestamp{color:#555;font-size:10px;margin-right:8px}
 .output .error{color:#e94560}
 .output .info-msg{color:#f0a500}
+.output .warn-msg{color:#ff8a80}
 .output .sent-cmd{color:#4fc3f7}
 .output::-webkit-scrollbar{width:8px}
 .output::-webkit-scrollbar-track{background:#0a0a1a}
@@ -80,275 +165,522 @@ body{
   flex-direction:column;
   gap:8px;
 }
-.input-bar{
-  background:#16213e;
-  padding:8px 12px;
+.empty-state small{color:#444}
+/* 内联输入行 */
+#inputLine{
   display:flex;
-  gap:8px;
-  border-top:1px solid #0f3460;
-  flex-shrink:0;
   align-items:center;
+  padding:2px 0;
 }
-.input-bar input[type="text"]{
-  flex:1;
-  background:#0a0a1a;
-  color:#e0e0e0;
-  border:1px solid #0f3460;
-  padding:6px 10px;
-  border-radius:4px;
-  font-family:Consolas,Monaco,'Courier New',monospace;
-  font-size:13px;
-  outline:none;
-}
-.input-bar input[type="text"]:focus{border-color:#e94560}
-.input-bar select{
-  background:#0f3460;
-  color:#e0e0e0;
-  border:1px solid #1a508b;
-  padding:4px 8px;
-  border-radius:4px;
-  font-size:11px;
-  font-family:inherit;
-  cursor:pointer;
-}
-.input-bar button.send-btn{
-  background:#e94560;
-  color:#fff;
-  border:none;
-  padding:6px 16px;
-  border-radius:4px;
-  cursor:pointer;
-  font-size:12px;
-  font-family:inherit;
+#inputLine .in-prefix{color:#4fc3f7;white-space:pre;user-select:none}
+#inputLine .in-text{color:#e0e0e0;white-space:pre}
+#inputLine .in-cursor{
+  color:#00ff41;
   font-weight:bold;
+  animation:blink 1s step-end infinite;
 }
-.input-bar button.send-btn:hover{background:#ff6b81}
-.input-bar button.send-btn:disabled{background:#555;cursor:not-allowed}
+#inputLine.disabled .in-cursor{animation:none;color:#555}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 </style>
 </head>
 <body>
 <div class="header">
   <span class="title">🔌 串口实时终端</span>
-  <span id="status" class="status disconnected">未连接</span>
+  <span id="roleBadge" class="role-badge monitor">👁 监视端</span>
   <span class="info" id="portInfo"></span>
 </div>
-<div class="controls">
-  <button onclick="clearOutput()">🧹 清屏</button>
-  <button onclick="toggleScroll()" id="scrollBtn">🔽 自动滚动</button>
-  <button class="danger" onclick="disconnectSSE()">⛔ 断开 SSE</button>
-  <span class="byte-count" id="byteCount">0 bytes</span>
+<div class="controls" id="controls">
+  <!-- 折叠时可隐藏的内容 -->
+  <span class="control-label">端口:</span>
+  <select id="portSelect">
+    <option value="">-- 选择端口 --</option>
+  </select>
+  <button class="refresh-btn" onclick="refreshPorts()" title="刷新端口列表">🔄</button>
+  <span class="control-label">波特率:</span>
+  <select id="baudSelect">
+    <option value="9600">9600</option>
+    <option value="19200">19200</option>
+    <option value="38400">38400</option>
+    <option value="57600">57600</option>
+    <option value="115200" selected>115200</option>
+    <option value="230400">230400</option>
+    <option value="460800">460800</option>
+    <option value="921600">921600</option>
+  </select>
+  <button class="connect-btn" id="connectBtn" onclick="connectSerial()">🔌 连接</button>
+  <button class="disconnect-btn" id="disconnectBtn" onclick="disconnectSerial()" style="display:none">⏹ 断开</button>
+  <button class="request-btn" id="requestBtn" onclick="requestControl()" style="display:none">🤝 申请控制</button>
+  <button class="force-btn" id="forceBtn" onclick="forceControl()" style="display:none">⚡ 强制控制</button>
+  <!-- 始终可见 -->
+  <div class="status-strip disconnected" id="statusStrip">
+    <span id="statusText"></span>
+    <div class="client-dropdown" id="clientDropdown"></div>
+  </div>
+  <span class="byte-count" id="byteCount">0 B</span>
+  <button class="hideable" onclick="toggleTimestamp()" id="tsBtn" title="时间戳">🕐</button>
+  <button class="hideable" onclick="toggleEcho()" id="echoBtn" title="回显">💬</button>
+  <button class="hideable" onclick="clearOutput()">🧹</button>
+  <button class="hideable" onclick="toggleScroll()" id="scrollBtn">🔽</button>
+  <button class="hideable" onclick="sendCommand()" id="sendBtn" disabled>发送</button>
+  <button class="hideable" onclick="copyOutput()">📋</button>
+  <button class="hideable" onclick="saveOutput()">💾</button>
+  <button onclick="toggleToolbar()" id="toolbarBtn" title="折叠工具栏">◀</button>
 </div>
 <div class="output" id="output">
   <div class="empty-state">
     <span>等待串口数据...</span>
-    <small>请确保 MCP 已打开串口 (serial_start 或 AUTO_CONNECT)</small>
+    <small>请在上方选择串口并点击"连接"</small>
+  </div>
+  <div id="inputLine" class="disabled">
+    <span class="in-prefix">&gt; </span>
+    <span class="in-text" id="inText"></span><span class="in-cursor" id="inCursor">█</span>
   </div>
 </div>
-<div class="input-bar">
-  <input type="text" id="cmdInput" placeholder="输入要发送的命令..."
-         onkeydown="if(event.key==='Enter')sendCommand()" />
-  <select id="lineEnding">
-    <option value="&#10;">\n (LF)</option>
-    <option value="&#13;&#10;">\r\n (CRLF)</option>
-    <option value="&#13;">\r (CR)</option>
-    <option value="">无</option>
-  </select>
-  <button class="send-btn" id="sendBtn" onclick="sendCommand()">发送</button>
-</div>
+<div class="toast-container" id="toastContainer"></div>
 
 <script>
 const BASE_URL = window.location.origin;
-let eventSource = null;
-let autoScroll = true;
-let totalBytes = 0;
-let firstData = true;
-let lineBuffer = "";
+let CLIENT_ID = sessionStorage.getItem('mcpSerialClientId');
+if (!CLIENT_ID) { CLIENT_ID = crypto.randomUUID(); sessionStorage.setItem('mcpSerialClientId', CLIENT_ID); }
+let CLIENT_NAME = sessionStorage.getItem('mcpSerialClientName');
+if (!CLIENT_NAME) {
+  const ua = navigator.userAgent;
+  CLIENT_NAME = (ua.includes('Edg')?'Edge':ua.includes('Chrome')?'Chrome':ua.includes('Firefox')?'Firefox':ua.includes('Safari')?'Safari':'Browser')+'-'+CLIENT_ID.slice(0,4);
+  sessionStorage.setItem('mcpSerialClientName', CLIENT_NAME);
+}
 
-function init(){connectSSE();}
+let eventSource = null, autoScroll = true, showTimestamp = false, showEcho = false;
+let totalBytes = 0, firstData = true, lineBuffer = "", isController = false;
+let inputText = '', cursorPos = 0, inputActive = false;
 
-function connectSSE(){
-  if(eventSource) eventSource.close();
-  eventSource = new EventSource(BASE_URL + '/events');
-  eventSource.onopen = () => {
-    document.getElementById('status').textContent = '监听中';
-    document.getElementById('status').className = 'status connected';
-    appendLine('--- SSE 已连接，等待串口数据 ---', 'info-msg');
-  };
+const output = document.getElementById('output');
+const inputLine = document.getElementById('inputLine');
+const inText = document.getElementById('inText');
+const inCursor = document.getElementById('inCursor');
+const sendBtn = document.getElementById('sendBtn');
+
+// 点击输出区或输入行 → 激活输入
+output.addEventListener('click', () => { if (isController) { inputActive = true; updateInputVisibility(); } });
+inputLine.addEventListener('click', () => { if (isController) { inputActive = true; updateInputVisibility(); } });
+
+function init() {
+  document.getElementById('tsBtn').style.opacity = '0.5';
+  document.getElementById('echoBtn').style.opacity = '0.5';
+  document.getElementById('statusStrip').addEventListener('click', toggleClientList);
+  document.getElementById('statusText').textContent = '❌ 未连接 | 👥 0 个客户端 ▾';
+  connectSSE(); refreshPorts();
+}
+
+// ---- SSE ----
+function connectSSE() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource(BASE_URL + '/events?clientId=' + encodeURIComponent(CLIENT_ID) + '&name=' + encodeURIComponent(CLIENT_NAME));
+  eventSource.onopen = () => appendLine('--- SSE 已连接 ---', 'info-msg');
   eventSource.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if(firstData){
-        clearOutput();
-        firstData = false;
-      }
+      if (firstData) { clearOutput(); firstData = false; }
       appendText(msg.text);
       totalBytes += msg.text.length;
       updateByteCount();
-    } catch(e){
-      appendLine('解析错误: ' + e.message, 'error');
-    }
+    } catch(e) { appendLine('解析错误: '+e.message, 'error'); }
   };
-  eventSource.onerror = () => {
-    document.getElementById('status').textContent = '连接断开';
-    document.getElementById('status').className = 'status disconnected';
-    appendLine('--- SSE 连接断开，3秒后重连 ---', 'error');
-    if(eventSource){
-      eventSource.close();
-      eventSource = null;
-    }
-    setTimeout(connectSSE, 3000);
-  };
+  eventSource.addEventListener('status', (e) => { try { updateUIFromStatus(JSON.parse(e.data)); } catch(_){} });
+  eventSource.addEventListener('control-request', (e) => { try { const d=JSON.parse(e.data); showControlRequest(d.requesterId); } catch(_){} });
+  eventSource.addEventListener('control-response', (e) => {
+    try { const d=JSON.parse(e.data); showToast(d.approved?'✅ 申请已通过，当前为控制端':'❌ 申请被拒绝', d.approved?'':'warn'); } catch(_){}
+  });
+  eventSource.addEventListener('control-taken', (e) => {
+    try { const d=JSON.parse(e.data);
+      if (d.newController===CLIENT_ID) showToast('✅ 已成为控制端','');
+      else if (d.oldController===CLIENT_ID||isController) showToast('⚠️ '+(d.reason||'控制权已被接管')+'，当前为监视端','warn');
+    } catch(_){}
+  });
+  eventSource.onerror = () => { if (eventSource) { eventSource.close(); eventSource = null; } setTimeout(connectSSE, 3000); };
 }
 
-function disconnectSSE(){
-  if(eventSource){
-    eventSource.close();
-    eventSource = null;
+// ---- 终端内联输入 ----
+// capture 阶段拦截 ESC + Ctrl+Key
+window.addEventListener('keydown', (e) => {
+  if (!isController) return;
+  // ESC → 发送 0x1B 并释放输入
+  if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    inputText = inputText.slice(0, cursorPos) + '\x1b' + inputText.slice(cursorPos);
+    cursorPos++;
+    renderInput();
+    if (inputText.length === 0 || cursorPos === inputText.length) {
+      // 发送已有的内容
+      sendCommand();
+    }
+    inputActive = false;
+    updateInputVisibility();
+    return;
   }
-  document.getElementById('status').textContent = '已手动断开';
-  document.getElementById('status').className = 'status disconnected';
-  appendLine('--- SSE 已手动断开 ---', 'info-msg');
+  if (!inputActive) return;
+  if (e.ctrlKey && !e.metaKey && !e.altKey) {
+    const code = e.key.toUpperCase().charCodeAt(0);
+    if (code >= 65 && code <= 90) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const ctrlChar = String.fromCharCode(code - 64);
+      inputText = inputText.slice(0, cursorPos) + ctrlChar + inputText.slice(cursorPos);
+      cursorPos++;
+      renderInput();
+    }
+  }
+}, {capture: true});
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'SELECT') return;
+  if (!isController || !inputActive) return;
+  if (e.altKey) return; // Alt+Key 留给 VS Code
+  if (e.ctrlKey || e.metaKey) return; // Ctrl/Meta 已在 capture 阶段处理
+  if (e.key === 'Enter') { e.preventDefault(); sendCommand(); return; }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); if (cursorPos>0) { cursorPos--; renderInput(); } return; }
+  if (e.key === 'ArrowRight') { e.preventDefault(); if (cursorPos<inputText.length) { cursorPos++; renderInput(); } return; }
+  if (e.key === 'Home') { e.preventDefault(); cursorPos=0; renderInput(); return; }
+  if (e.key === 'End') { e.preventDefault(); cursorPos=inputText.length; renderInput(); return; }
+  if (e.key === 'Backspace') { e.preventDefault(); if(cursorPos>0){ inputText=inputText.slice(0,cursorPos-1)+inputText.slice(cursorPos); cursorPos--; renderInput(); } return; }
+  if (e.key === 'Delete') { e.preventDefault(); if(cursorPos<inputText.length){ inputText=inputText.slice(0,cursorPos)+inputText.slice(cursorPos+1); renderInput(); } return; }
+  if (e.key.length === 1) { e.preventDefault(); inputText=inputText.slice(0,cursorPos)+e.key+inputText.slice(cursorPos); cursorPos++; renderInput(); }
+});
+
+document.addEventListener('paste', (e) => {
+  if (!isController || !inputActive) return;
+  if (e.target.tagName === 'SELECT') return;
+  e.preventDefault();
+  const text = (e.clipboardData||window.clipboardData).getData('text');
+  if (text) { inputText=inputText.slice(0,cursorPos)+text+inputText.slice(cursorPos); cursorPos+=text.length; renderInput(); }
+});
+
+function renderInput() {
+  const before = inputText.slice(0, cursorPos);
+  const at = inputText.slice(cursorPos, cursorPos+1) || '█';
+  const after = inputText.slice(cursorPos+1);
+  inText.textContent = before;
+  inCursor.textContent = at;
+  let trail = inCursor.nextElementSibling;
+  if (after) {
+    if (!trail || !trail.classList.contains('in-trail')) {
+      trail = document.createElement('span'); trail.className = 'in-trail'; trail.style.color = '#e0e0e0';
+      inCursor.after(trail);
+    }
+    trail.textContent = after;
+  } else {
+    if (trail && trail.classList.contains('in-trail')) trail.remove();
+  }
+  // 确保输入行可见
+  if (autoScroll) output.scrollTop = output.scrollHeight;
 }
 
-async function sendCommand(){
-  const input = document.getElementById('cmdInput');
-  const cmd = input.value.trim();
-  if(!cmd) return;
-  const lineEnding = document.getElementById('lineEnding').value;
-  const displayLE = lineEnding
-    ? ' [' + lineEnding.replace(/\n/g,'\\n').replace(/\r/g,'\\r') + ']'
-    : '';
-  appendLine('> ' + cmd + displayLE, 'sent-cmd');
-  const btn = document.getElementById('sendBtn');
-  btn.disabled = true;
-  input.disabled = true;
+function updateInputVisibility() {
+  // 回显关 → 纯串口模式，完全隐藏输入行；回显开 → 显示 > 和光标
+  if (!isController) {
+    inputLine.style.display = 'none';
+    return;
+  }
+  if (!inputActive) {
+    inputLine.style.display = '';
+    inputLine.classList.add('disabled');
+    inCursor.style.display = 'none';
+    inText.textContent = '[点击此处激活输入]';
+    return;
+  }
+  if (!showEcho) {
+    inputLine.style.display = 'none';
+    inCursor.style.display = 'none';
+    inputText = ''; cursorPos = 0;
+  } else {
+    inputLine.style.display = '';
+    inputLine.classList.remove('disabled');
+    inCursor.style.display = '';
+    renderInput();
+  }
+}
+
+function setInputEnabled(enabled) {
+  if (enabled) {
+    updateInputVisibility();
+  } else {
+    inputLine.style.display = 'none';
+    inCursor.style.display = 'none';
+    inputText = ''; cursorPos = 0;
+  }
+}
+
+async function sendCommand() {
+  if (!isController) return;
+  const cmd = inputText;
+  if (!cmd) return;
+  const le = '\r\n';
+  if (showEcho) appendLine('> ' + cmd, 'sent-cmd');
+  inputText = ''; cursorPos = 0; renderInput();
+  sendBtn.disabled = true;
   try {
     const resp = await fetch(BASE_URL + '/send', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({command: cmd, lineEnding: lineEnding}),
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command:cmd, lineEnding:le, clientId:CLIENT_ID}),
     });
-    if(!resp.ok){
-      const err = await resp.json();
-      appendLine('发送失败: ' + (err.error || '未知错误'), 'error');
+    if (!resp.ok) { const err=await resp.json(); appendLine('发送失败: '+(err.error||'未知错误'),'error'); }
+  } catch(e) { appendLine('发送失败: '+e.message,'error'); }
+  finally { sendBtn.disabled = false; }
+}
+
+// ---- 客户端列表折叠 ----
+function toggleClientList(e) {
+  e.stopPropagation();
+  const dd = document.getElementById('clientDropdown');
+  dd.classList.toggle('show');
+}
+document.addEventListener('click', (e) => {
+  const dd = document.getElementById('clientDropdown');
+  const ss = document.getElementById('statusStrip');
+  if (!ss.contains(e.target)) dd.classList.remove('show');
+});
+
+function renderClientDropdown(clients) {
+  const dd = document.getElementById('clientDropdown');
+  if (!clients || clients.length===0) { dd.innerHTML=''; return; }
+  dd.innerHTML = clients.map(c =>
+    '<div class="client-item'+(c.isController?' controller':'')+'">'+
+    (c.isController?'🎮':'👁')+' '+escapeHtml(c.name)+
+    '<span class="c-ip">'+escapeHtml(c.ip)+'</span></div>'
+  ).join('');
+}
+
+// ---- 串口控制 ----
+async function refreshPorts() {
+  const sel = document.getElementById('portSelect');
+  const cv = sel.value;
+  sel.innerHTML = '<option value="">-- 正在扫描...</option>'; sel.disabled = true;
+  try {
+    const r = await fetch(BASE_URL+'/ports'); if (!r.ok) throw new Error('');
+    const ports = await r.json(); sel.innerHTML = '';
+    if (!ports.length) sel.innerHTML = '<option value="">-- 无串口 --</option>';
+    else ports.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.path; opt.textContent = p.manufacturer ? p.path+' - '+p.manufacturer : p.path;
+      if (p.path===cv) opt.selected=true;
+      sel.appendChild(opt);
+    });
+  } catch(e) { sel.innerHTML = '<option value="">-- 获取失败 --</option>'; }
+  finally { sel.disabled = (getSerialConnected() && !isController); }
+}
+
+async function connectSerial() {
+  if (getSerialConnected() && !isController) return; // 已连接时只有控制端才能操作
+  const port = document.getElementById('portSelect').value;
+  if (!port) { appendLine('请先选择串口','error'); return; }
+  const br = parseInt(document.getElementById('baudSelect').value,10)||115200;
+  const btn = document.getElementById('connectBtn'); btn.disabled=true; btn.textContent='连接中...';
+  try {
+    const r = await fetch(BASE_URL+'/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port,baudRate:br,clientId:CLIENT_ID})});
+    if(!r.ok){ const e=await r.json(); throw new Error(e.error||'连接失败'); }
+    firstData=true;
+  } catch(e) { appendLine('连接失败: '+e.message,'error'); }
+  finally { btn.disabled=false; btn.textContent='🔌 连接'; }
+}
+
+async function disconnectSerial() {
+  if (!isController) return;
+  const btn=document.getElementById('disconnectBtn'); btn.disabled=true; btn.textContent='断开中...';
+  try {
+    const r=await fetch(BASE_URL+'/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CLIENT_ID})});
+    if(!r.ok) throw new Error('断开失败');
+  } catch(e) { appendLine('断开失败: '+e.message,'error'); }
+  finally { btn.disabled=false; btn.textContent='⏹ 断开'; }
+}
+
+async function requestControl() {
+  const btn=document.getElementById('requestBtn'); btn.disabled=true; btn.textContent='申请中...';
+  try {
+    const r=await fetch(BASE_URL+'/request-control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CLIENT_ID})});
+    const d=await r.json();
+    showToast(r.ok?'🤝 '+d.message:'❌ '+(d.error||'申请失败'), r.ok?'':'warn');
+  } catch(e) { showToast('❌ '+e.message,'warn'); }
+  finally { btn.disabled=false; btn.textContent='🤝 申请控制'; }
+}
+
+async function forceControl() {
+  const btn=document.getElementById('forceBtn'); btn.disabled=true; btn.textContent='强制中...';
+  try {
+    const r=await fetch(BASE_URL+'/force-control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CLIENT_ID})});
+    const d=await r.json();
+    showToast(r.ok?'⚡ 已强制接管':'❌ '+(d.error||'接管失败'), r.ok?'':'warn');
+  } catch(e) { showToast('❌ '+e.message,'warn'); }
+  finally { btn.disabled=false; btn.textContent='⚡ 强制控制'; }
+}
+
+function showControlRequest(requesterId) {
+  const container=document.getElementById('toastContainer');
+  const toast=document.createElement('div'); toast.className='toast warn'; toast.id='ctrl-req-'+requesterId;
+  const shortId=requesterId.slice(0,8); let countdown=10;
+  toast.innerHTML='<div class="toast-msg">🤝 <b>'+shortId+'...</b> 申请成为控制端</div>'+
+    '<div class="toast-timer" id="timer-'+requesterId+'">'+countdown+' 秒后自动同意</div>'+
+    '<div class="toast-actions"><button class="danger" onclick="respondControl(\''+requesterId+'\',false)">拒绝</button>'+
+    '<button onclick="respondControl(\''+requesterId+'\',true)">同意</button></div>';
+  container.appendChild(toast);
+  const tid=setInterval(()=>{
+    countdown--; const el=document.getElementById('timer-'+requesterId); if(el) el.textContent=countdown+' 秒后自动同意';
+    if(countdown<=0){clearInterval(tid);removeToast(toast.id);}
+  },1000);
+  setTimeout(()=>{clearInterval(tid);removeToast(toast.id);},10000);
+}
+
+async function respondControl(requesterId, approve) {
+  try { await fetch(BASE_URL+'/respond-control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CLIENT_ID,requesterId,approve})}); } catch(_){}
+  removeToast('ctrl-req-'+requesterId);
+}
+
+function removeToast(id){ const el=document.getElementById(id); if(el) el.remove(); }
+function showToast(msg,cls){
+  const c=document.getElementById('toastContainer'); const t=document.createElement('div');
+  t.className='toast'+(cls?' '+cls:''); t.textContent=msg; c.appendChild(t); setTimeout(()=>t.remove(),4000);
+}
+
+// ---- UI 状态更新 ----
+function updateUIFromStatus(status) {
+  const connectBtn=document.getElementById('connectBtn'), disconnectBtn=document.getElementById('disconnectBtn');
+  const portSelect=document.getElementById('portSelect'), baudSelect=document.getElementById('baudSelect');
+  const statusStrip=document.getElementById('statusStrip'), sendBtnEl=document.getElementById('sendBtn');
+  const portInfo=document.getElementById('portInfo'), roleBadge=document.getElementById('roleBadge');
+  const requestBtn=document.getElementById('requestBtn'), forceBtn=document.getElementById('forceBtn');
+
+  isController = (status.controllerClientId === CLIENT_ID);
+  if (isController) {
+    roleBadge.textContent='🎮 控制端'; roleBadge.className='role-badge controller';
+    requestBtn.style.display='none'; forceBtn.style.display='none';
+  } else {
+    roleBadge.textContent='👁 监视端'; roleBadge.className='role-badge monitor';
+    requestBtn.style.display=''; forceBtn.style.display='';
+    requestBtn.disabled=false; requestBtn.textContent='🤝 申请控制';
+    forceBtn.disabled=false; forceBtn.textContent='⚡ 强制控制';
+  }
+
+  const clients = status.clients || [];
+  renderClientDropdown(clients);
+  let clientSummary = '👥 '+clients.length+' 个客户端 ▾';
+  if (clients.length > 0) {
+    const names = clients.map(c => (c.isController?'🎮':'👁')+c.name).join(' ');
+    clientSummary = '👥 '+clients.length+' 个客户端: '+names+' ▾';
+  }
+
+  if (status.connected) {
+    if (isController) {
+      connectBtn.style.display='none'; disconnectBtn.style.display=''; disconnectBtn.disabled=false; disconnectBtn.textContent='⏹ 断开';
+      portSelect.disabled=true; baudSelect.disabled=true;
+      sendBtnEl.disabled=false; setInputEnabled(true);
+    } else {
+      connectBtn.style.display='none'; disconnectBtn.style.display='none';
+      portSelect.disabled=true; baudSelect.disabled=true;
+      sendBtnEl.disabled=true; setInputEnabled(false);
     }
-  } catch(e){
-    appendLine('发送失败: ' + e.message, 'error');
-  } finally {
-    btn.disabled = false;
-    input.disabled = false;
-    input.value = '';
-    input.focus();
+    if (status.port && ![...portSelect.options].some(o=>o.value===status.port)) {
+      const opt=document.createElement('option'); opt.value=status.port; opt.textContent=status.port+' (当前)'; opt.selected=true; portSelect.appendChild(opt);
+    }
+    if (status.port) portSelect.value=status.port;
+    if (status.baudRate) baudSelect.value=String(status.baudRate);
+    document.getElementById('statusText').textContent = '✅ '+status.port+' @ '+status.baudRate+' | '+formatUptime(status.uptimeMs)+' | '+formatBytes(status.stats.totalBytes)+' | '+clientSummary;
+    statusStrip.className='status-strip connected';
+    portInfo.textContent=status.port+' @ '+status.baudRate;
+  } else {
+    // 未连接时所有人均可选择端口并连接
+    connectBtn.style.display=''; connectBtn.disabled=false; connectBtn.textContent='🔌 连接';
+    disconnectBtn.style.display='none';
+    portSelect.disabled=false; baudSelect.disabled=false;
+    sendBtnEl.disabled=true; setInputEnabled(false);
+    const statText = status.stats && status.stats.totalBytes>0 ? ' | 已接收: '+formatBytes(status.stats.totalBytes) : '';
+    document.getElementById('statusText').textContent = '❌ 未连接'+statText+' | '+clientSummary;
+    statusStrip.className='status-strip disconnected';
+    portInfo.textContent = status.stats && status.stats.totalBytes>0 ? '已接收: '+formatBytes(status.stats.totalBytes) : '';
   }
 }
 
-function appendText(text){
-  const output = document.getElementById('output');
-  const emptyState = output.querySelector('.empty-state');
-  if(emptyState) output.innerHTML = '';
+// ---- 输出渲染 ----
+function appendText(text) {
+  const out = document.getElementById('output');
+  const es = out.querySelector('.empty-state'); if (es) es.remove();
   const combined = lineBuffer + text;
   const parts = combined.split('\n');
-  for(let i = 0; i < parts.length - 1; i++){
+  for (let i=0; i<parts.length-1; i++) {
+    const div = document.createElement('div'); div.className = 'line';
     const line = parts[i].replace(/\r$/, '');
-    const now = new Date();
-    const ts = now.toTimeString().slice(0,8) + '.' + String(now.getMilliseconds()).padStart(3,'0');
-    const div = document.createElement('div');
-    div.className = 'line';
-    div.innerHTML = '<span class="timestamp">[' + ts + ']</span>' + escapeHtml(line);
-    output.appendChild(div);
+    if (showTimestamp) { const n=new Date(); div.innerHTML='<span class="timestamp">['+n.toTimeString().slice(0,8)+'.'+String(n.getMilliseconds()).padStart(3,'0')+']</span>'+escapeHtml(line); }
+    else div.textContent = line;
+    out.insertBefore(div, inputLine);
   }
-  lineBuffer = parts[parts.length - 1];
-  if(lineBuffer){
-    let partialElem = document.getElementById('partial-line');
-    if(!partialElem){
-      partialElem = document.createElement('div');
-      partialElem.id = 'partial-line';
-      partialElem.className = 'line partial';
-      output.appendChild(partialElem);
-    }
-    partialElem.textContent = lineBuffer;
-  } else {
-    const partialElem = document.getElementById('partial-line');
-    if(partialElem) partialElem.remove();
+  lineBuffer = parts[parts.length-1];
+  if (lineBuffer) {
+    let pe = document.getElementById('partial-line');
+    if (!pe) { pe=document.createElement('div'); pe.id='partial-line'; pe.className='line partial'; out.insertBefore(pe, inputLine); }
+    pe.textContent = lineBuffer;
+  } else { const pe=document.getElementById('partial-line'); if(pe) pe.remove(); }
+  if (autoScroll) out.scrollTop = out.scrollHeight;
+}
+
+function appendLine(text, cls) {
+  const out = document.getElementById('output');
+  const es = out.querySelector('.empty-state'); if (es) es.remove();
+  const div = document.createElement('div'); div.className = 'line'+(cls?' '+cls:'');
+  if (showTimestamp) { const n=new Date(); div.innerHTML='<span class="timestamp">['+n.toTimeString().slice(0,8)+'.'+String(n.getMilliseconds()).padStart(3,'0')+']</span>'+escapeHtml(text); }
+  else div.textContent = text;
+  out.insertBefore(div, inputLine);
+  if (autoScroll) out.scrollTop = out.scrollHeight;
+}
+
+function clearOutput() {
+  const out = document.getElementById('output');
+  // 保留 inputLine
+  out.querySelectorAll('.line,.empty-state,#partial-line').forEach(el=>el.remove());
+  totalBytes=0; lineBuffer=''; updateByteCount();
+}
+
+function toggleScroll() { autoScroll=!autoScroll; document.getElementById('scrollBtn').textContent=autoScroll?'🔽':'📌'; }
+function toggleTimestamp() { showTimestamp=!showTimestamp; const b=document.getElementById('tsBtn'); b.textContent=showTimestamp?'🕐✓':'🕐'; b.style.opacity=showTimestamp?'1':'0.5'; }
+function toggleEcho() { showEcho=!showEcho; const b=document.getElementById('echoBtn'); b.textContent=showEcho?'💬✓':'💬'; b.style.opacity=showEcho?'1':'0.5'; updateInputVisibility(); }
+let toolbarCollapsed = false;
+function toggleToolbar() { toolbarCollapsed=!toolbarCollapsed; const c=document.getElementById('controls'); const b=document.getElementById('toolbarBtn'); if(toolbarCollapsed){c.classList.add('collapsed');b.textContent='▶';}else{c.classList.remove('collapsed');b.textContent='◀';} }
+function getSerialConnected() { return document.getElementById('statusStrip').classList.contains('connected'); }
+function updateByteCount() { document.getElementById('byteCount').textContent=formatBytes(totalBytes); }
+
+async function copyOutput() {
+  let text=''; output.querySelectorAll('.line').forEach(d=>{if(d.id!=='inputLine'){const ts=d.querySelector('.timestamp'); text+=(ts&&showTimestamp?ts.textContent+' ':'')+(d.textContent||'')+'\n';}});
+  if(!text.trim()){showToast('无内容','warn');return;}
+  try{await navigator.clipboard.writeText(text);showToast('✅ 已复制','');}
+  catch(e){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);showToast('✅ 已复制','');}
+}
+
+async function saveOutput() {
+  let text=''; output.querySelectorAll('.line').forEach(d=>{if(d.id!=='inputLine'){const ts=d.querySelector('.timestamp'); text+=(ts&&showTimestamp?ts.textContent+' ':'')+(d.textContent||'')+'\n';}});
+  if(!text.trim()){showToast('无内容','warn');return;}
+  if(window.showSaveFilePicker){
+    try{
+      const n=new Date(); const ts=n.toISOString().replace(/[:.]/g,'-').slice(0,19);
+      const h=await window.showSaveFilePicker({suggestedName:'serial-log-'+ts+'.txt',types:[{description:'文本',accept:{'text/plain':['.txt','.log']}}]});
+      const w=await h.createWritable(); await w.write(text); await w.close();
+      showToast('💾 已保存: '+h.name,''); return;
+    }catch(e){if(e.name==='AbortError')return;}
   }
-  if(autoScroll) output.scrollTop = output.scrollHeight;
+  const blob=new Blob([text],{type:'text/plain;charset=utf-8'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19); a.download='serial-log-'+ts+'.txt'; a.click();
+  URL.revokeObjectURL(url); showToast('💾 已保存: '+a.download,'');
 }
 
-function appendLine(text, cls){
-  const output = document.getElementById('output');
-  const emptyState = output.querySelector('.empty-state');
-  if(emptyState) output.innerHTML = '';
-  const now = new Date();
-  const ts = now.toTimeString().slice(0,8) + '.' + String(now.getMilliseconds()).padStart(3,'0');
-  const div = document.createElement('div');
-  div.className = 'line' + (cls ? ' ' + cls : '');
-  div.innerHTML = '<span class="timestamp">[' + ts + ']</span>' + escapeHtml(text);
-  output.appendChild(div);
-  if(autoScroll) output.scrollTop = output.scrollHeight;
-}
+// ---- 工具函数 ----
+function escapeHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function formatUptime(ms){if(ms<1000)return ms+'ms';const s=Math.floor(ms/1000);if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+(s%60)+'s';const h=Math.floor(m/60);return h+'h '+(m%60)+'m '+(s%60)+'s';}
+function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(2)+' MB';}
 
-function clearOutput(){
-  const output = document.getElementById('output');
-  output.innerHTML = '';
-  totalBytes = 0;
-  lineBuffer = '';
-  updateByteCount();
-}
-
-function toggleScroll(){
-  autoScroll = !autoScroll;
-  document.getElementById('scrollBtn').textContent = autoScroll ? '🔽 自动滚动' : '📌 暂停滚动';
-}
-
-function updateByteCount(){
-  const el = document.getElementById('byteCount');
-  if(totalBytes >= 1048576){
-    el.textContent = (totalBytes/1048576).toFixed(1) + ' MB';
-  } else if(totalBytes >= 1024){
-    el.textContent = (totalBytes/1024).toFixed(1) + ' KB';
-  } else {
-    el.textContent = totalBytes + ' bytes';
-  }
-}
-
-function escapeHtml(text){
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function formatUptime(ms){
-  const s = Math.floor(ms/1000);
-  if(s < 60) return s + 's';
-  const m = Math.floor(s/60);
-  if(m < 60) return m + 'm ' + (s%60) + 's';
-  const h = Math.floor(m/60);
-  return h + 'h ' + (m%60) + 'm ' + (s%60) + 's';
-}
-
-function formatBytes(bytes){
-  if(bytes < 1024) return bytes + ' B';
-  if(bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
-  return (bytes/1048576).toFixed(2) + ' MB';
-}
-
-setInterval(async () => {
-  try {
-    const resp = await fetch(BASE_URL + '/status');
-    const status = await resp.json();
-    const infoEl = document.getElementById('portInfo');
-    if(status.connected){
-      infoEl.textContent = status.port + ' @ ' + status.baudRate
-        + ' | ' + formatBytes(status.stats.totalBytes)
-        + ' | 运行: ' + formatUptime(status.uptimeMs);
-    } else {
-      infoEl.textContent = status.stats ? '已接收: ' + formatBytes(status.stats.totalBytes) : '';
-    }
-  } catch(e){}
-}, 3000);
+setInterval(async()=>{
+  try{
+    const r=await fetch(BASE_URL+'/status'); const s=await r.json();
+    if(!eventSource||eventSource.readyState!==EventSource.OPEN) updateUIFromStatus(s);
+    if(s.connected) document.getElementById('portInfo').textContent=s.port+' @ '+s.baudRate+' | '+formatBytes(s.stats.totalBytes);
+    document.getElementById('byteCount').textContent=formatBytes(s.stats.totalBytes);
+  }catch(_){}
+},5000);
 
 init();
 </script>
