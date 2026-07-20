@@ -14,7 +14,7 @@ const AUTO_CONNECT = process.env.SERIAL_AUTO_CONNECT === "true";
 const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN !== "false"; // 默认 true
 
 const monitor = new SerialMonitor(BUFFER_MAX_SIZE);
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.3.0";
 
 const server = new Server({ name: "serial-terminal", version: APP_VERSION }, { capabilities: { tools: {} } });
 
@@ -70,6 +70,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             lineEnding: { type: "string", description: "行结束符，如 \\n, \\r\\n，默认 \\n" },
           },
           required: ["command"],
+        },
+      },
+      {
+        name: "serial_write",
+        description: "流式写入：向串口发送原始数据，不追加行尾，不等待响应。用于逐字符发送（如终端交互式输入）。与 serial_send 的区别：serial_write 发送后立即返回，不读取响应；serial_send 发送完整命令行并等待响应。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            data: { type: "string", description: "要发送的原始数据（不加行尾）" },
+          },
+          required: ["data"],
         },
       },
       {
@@ -150,6 +161,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const resp = await monitor.send(cmd, le, timeout);
         return { content: [{ type: "text", text: resp }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: `错误: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    }
+
+    case "serial_write": {
+      if (!monitor.isActive()) return { content: [{ type: "text", text: "❌ 串口未打开" }], isError: true };
+      const data = String(args.data || "");
+      if (!data) return { content: [{ type: "text", text: "数据不能为空" }], isError: true };
+      try {
+        await monitor.write(data);
+        return { content: [{ type: "text", text: "✅" }] };
       } catch (error) {
         return { content: [{ type: "text", text: `错误: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
       }

@@ -1,5 +1,6 @@
 import * as http from "http";
 import { exec } from "child_process";
+import { WebSocketServer } from "ws";
 import { SerialMonitor } from "./serial-monitor.js";
 import { getViewerHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
@@ -139,6 +140,13 @@ export function startWebServer(
     res.end("Not Found");
   });
 
+  // WebSocket — Xterm.js 真终端
+  const wss = new WebSocketServer({ server });
+  wss.on("connection", (ws, req) => {
+    const name = (req.headers["user-agent"] || "ws").slice(0, 20);
+    monitor.addWSClient(ws, name);
+  });
+
   server.listen(port, () => {
     console.error(`[WebServer] 串口实时终端: http://localhost:${port}`);
     if (autoOpenBrowser) {
@@ -246,10 +254,10 @@ async function handleDisconnect(
 ): Promise<void> {
   try {
     const body = await parseBody<{ clientId?: string }>(req);
-    const permErr = checkController(monitor, body.clientId);
-    if (permErr) {
+    // 无控制端(自动连接)或本人是控制端 → 允许断开
+    if (monitor.controllerClientId && monitor.controllerClientId !== body.clientId) {
       res.writeHead(403, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: permErr }));
+      res.end(JSON.stringify({ error: "无权限: 需要控制端权限" }));
       return;
     }
     if (!monitor.isActive()) {
@@ -278,18 +286,21 @@ function handleSend(
   req.on("end", async () => {
     try {
       const { command, lineEnding, clientId } = JSON.parse(body) as SendRequestBody & { clientId?: string };
-      const permErr = checkController(monitor, clientId);
-      if (permErr) {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: permErr }));
-        return;
-      }
       if (!command || typeof command !== "string") {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "缺少 command 参数" }));
         return;
       }
       const le = typeof lineEnding === "string" ? lineEnding : "\n";
+      // 流式写入 (空行尾) 不需要控制权；完整命令需要
+      if (le !== "") {
+        const permErr = checkController(monitor, clientId);
+        if (permErr) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: permErr }));
+          return;
+        }
+      }
       await monitor.sendRaw(command, le);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));

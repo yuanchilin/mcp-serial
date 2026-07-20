@@ -1,6 +1,6 @@
 {
   "name": "@yuanchilin/mcp-serial",
-  "version": "2.2.0",
+  "version": "2.4.0",
   "description": "MCP Serial Terminal server for MoterSoc - persistent serial port communication with Web monitor",
   "private": false,
   "type": "module",
@@ -19,10 +19,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.6.0",
-    "serialport": "^13.0.0"
+    "serialport": "^13.0.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.3.3"
   },
   "repository": {

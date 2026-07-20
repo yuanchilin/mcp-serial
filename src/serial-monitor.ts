@@ -2,6 +2,7 @@ import type { SerialStatus } from "./types.js";
 import { RingBuffer } from "./ring-buffer.js";
 import { SerialPort } from "serialport";
 import type { ServerResponse } from "http";
+import type { WebSocket } from "ws";
 
 // ============================================================================
 // SSE 客户端信息
@@ -15,6 +16,15 @@ interface ClientInfo {
 }
 
 // ============================================================================
+// WebSocket 终端客户端
+// ============================================================================
+
+interface WSClient {
+  ws: WebSocket;
+  name: string;
+}
+
+// ============================================================================
 // 持久化串口监视器 - 保持串口打开，持续接收数据
 // ============================================================================
 
@@ -25,7 +35,10 @@ export class SerialMonitor {
   startedAt: Date | null = null;
   buffer: RingBuffer;
   sseClients = new Map<string, ClientInfo>();
+  wsClients = new Set<WSClient>();
   controllerClientId: string | null = null;
+  /** 跨 chunk 边界暂存的未完成 UTF-8 字节，拼接到下个 chunk */
+  private pendingBytes: Buffer = Buffer.alloc(0);
 
   constructor(bufferMaxSize: number) {
     this.buffer = new RingBuffer(bufferMaxSize);
@@ -76,9 +89,21 @@ export class SerialMonitor {
       });
 
       sp.on("data", (data: Buffer) => {
-        const text = data.toString("utf-8");
-        this.buffer.append(text);
-        this.broadcastSSE(text);
+        // 拼接上次未完成的 UTF-8 字节
+        const merged = this.pendingBytes.length > 0
+          ? Buffer.concat([this.pendingBytes, data])
+          : data;
+
+        // 分离完整序列和末尾不完整字节
+        const { complete, incomplete } = splitCompleteUTF8(merged);
+        this.pendingBytes = incomplete;
+
+        if (complete.length > 0) {
+          const text = complete.toString("utf-8");
+          this.buffer.append(text);
+          this.broadcastSSE(text);
+          this.broadcastWS(Buffer.from(data));  /* WebSocket 原始字节 */
+        }
       });
 
       sp.on("error", (err: Error) => {
@@ -112,18 +137,20 @@ export class SerialMonitor {
 
   /** 关闭串口 */
   async stop(): Promise<void> {
-    if (!this.serialPort) return;
+    const sp = this.serialPort;
+    if (!sp) return;
+    this.serialPort = null;           /* 先清引用, 防竞态 */
+    this.startedAt = null;
 
     return new Promise((resolve) => {
-      const sp = this.serialPort!;
-      sp.close(() => {
-        this.serialPort = null;
-        this.startedAt = null;
-        this.broadcastStatus();
-        console.error("[SerialMonitor] 串口已停止");
+      if (!sp.isOpen) { resolve(); return; }
+      sp.close((err) => {
+        if (err) console.error(`[SerialMonitor] 关闭错误: ${err.message}`);
+        else console.error("[SerialMonitor] 串口已停止");
         resolve();
       });
     });
+    this.broadcastStatus();
   }
 
   /**
@@ -198,11 +225,49 @@ export class SerialMonitor {
     }
 
     return new Promise((resolve, reject) => {
-      this.serialPort!.write(command + lineEnding, (err) => {
+      const payload = lineEnding !== "" ? command + lineEnding : command;
+      this.serialPort!.write(payload, (err) => {
         if (err) reject(err);
         else resolve();
       });
     });
+  }
+
+  /** 流式写入：仅发送原始字节，不追加行尾，不等待响应 */
+  async write(data: string): Promise<void> {
+    if (!this.serialPort || !this.serialPort.isOpen) {
+      throw new Error("串口未打开");
+    }
+
+    return new Promise((resolve, reject) => {
+      this.serialPort!.write(data, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  // ---- WebSocket 客户端管理 ----
+
+  addWSClient(ws: WebSocket, name: string): void {
+    this.wsClients.add({ ws, name });
+    ws.on("message", (data: Buffer) => {
+      if (this.serialPort && this.serialPort.isOpen) {
+        this.serialPort.write(data);
+      }
+    });
+    ws.on("close", () => {
+      for (const c of this.wsClients) { if (c.ws === ws) { this.wsClients.delete(c); break; } }
+    });
+    ws.on("error", () => {
+      for (const c of this.wsClients) { if (c.ws === ws) { this.wsClients.delete(c); break; } }
+    });
+  }
+
+  broadcastWS(data: Buffer): void {
+    for (const c of this.wsClients) {
+      try { c.ws.send(data); } catch { this.wsClients.delete(c); }
+    }
   }
 
   // ---- SSE 客户端管理 ----
@@ -320,4 +385,50 @@ export class SerialMonitor {
       }
     }
   }
+}
+
+// ============================================================================
+// UTF-8 边界处理 — 防止跨 chunk 截断多字节字符
+// ============================================================================
+
+/**
+ * 将 Buffer 分离为「完整 UTF-8 序列」和「末尾不完整字节」两部分。
+ * 不完整字节应暂存并拼接到下一 chunk 的开头。
+ */
+function splitCompleteUTF8(buffer: Buffer): { complete: Buffer; incomplete: Buffer } {
+  const len = buffer.length;
+
+  // 从末尾向前扫描最多 4 个字节（UTF-8 最长序列）
+  for (let i = len - 1; i >= 0 && i >= len - 4; i--) {
+    const byte = buffer[i];
+
+    if ((byte & 0x80) === 0x00) {
+      // ASCII (0xxxxxxx) — 干净边界，后面没有多字节序列
+      return { complete: buffer, incomplete: Buffer.alloc(0) };
+    }
+
+    if ((byte & 0xC0) === 0xC0) {
+      // 多字节序列起始字节 (11xxxxxx)
+      const seqLen =
+        (byte & 0xE0) === 0xC0 ? 2 :   // 110xxxxx → 2 字节
+        (byte & 0xF0) === 0xE0 ? 3 :   // 1110xxxx → 3 字节
+        (byte & 0xF8) === 0xF0 ? 4 :   // 11110xxx → 4 字节
+        1;                               // 不可能到这里
+
+      const available = len - i;
+      if (available < seqLen) {
+        // 不完整：起始字节后缺少后续字节
+        return {
+          complete: buffer.subarray(0, i),
+          incomplete: buffer.subarray(i),
+        };
+      }
+      // 序列完整
+      return { complete: buffer, incomplete: Buffer.alloc(0) };
+    }
+    // (byte & 0xC0) === 0x80: 后续字节 (10xxxxxx)，继续向前
+  }
+
+  // 没找到起始字节（全部是后续字节）→ 全部暂存
+  return { complete: Buffer.alloc(0), incomplete: buffer };
 }
