@@ -1,6 +1,6 @@
 {
   "name": "@yuanchilin/mcp-serial",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "MCP Serial Terminal server for MoterSoc - persistent serial port communication with Web monitor",
   "private": false,
   "type": "module",
