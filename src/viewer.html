@@ -8,11 +8,13 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;height:100vh;display:flex;flex-direction:column}
-#bar{background:#111;padding:3px 8px;display:flex;gap:6px;align-items:center;font:11px Consolas,monospace;color:#0f0;flex-shrink:0;border-bottom:1px solid #222}
-#bar select,#bar button{background:#000;color:#0f0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
+#bar{background:#111;padding:3px 8px;display:flex;gap:6px;align-items:center;font:11px Consolas,monospace;color:#c0c0c0;flex-shrink:0;border-bottom:1px solid #222}
+#bar select,#bar button{background:#000;color:#c0c0c0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
 #bar button:hover{background:#222}
-#bar .st{color:#666;margin-left:auto}
-#term{flex:1}
+#bar .st{color:#888;margin-left:auto}
+#term{height:calc(100vh - 30px);overflow:hidden}
+.xterm{height:100%}
+.xterm-viewport{height:100%!important}
 </style>
 </head>
 <body>
@@ -24,6 +26,9 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
     <option value="230400">230400</option><option value="460800">460800</option><option value="921600">921600</option>
   </select>
   <button id="cb" onclick="tc()">连接</button>
+  <button onclick="T.clear()">清除</button>
+  <button onclick="copyText()">复制</button>
+  <button onclick="saveText()">保存</button>
   <span class="st" id="st">未连接</span>
 </div>
 <div id="term"></div>
@@ -32,12 +37,34 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
 <script>
 const CID=sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',crypto.randomUUID()),sessionStorage.getItem('xtermCid'));
 const B=window.location.origin;
-let ws=null,conn=false;
-const T=new Terminal({cols:80,rows:24,fontSize:14,fontFamily:'Consolas,Monaco,monospace',
-  theme:{background:'#000',foreground:'#0f0',cursor:'#0f0',selectionBackground:'#0f0',selectionForeground:'#000'}});
+let ws=null,conn=false,log='';
+
+const T=new Terminal({fontSize:15,fontFamily:'Consolas,Monaco,monospace',
+  theme:{background:'#000',foreground:'#c0c0c0',cursor:'#fff',selectionBackground:'#444',selectionForeground:'#fff'}});
 T.open(document.getElementById('term'));
 T.focus();
-T.write('\x1b[32m等待连接...\x1b[0m\r\n');
+
+// 全屏自适应 (实测字符尺寸)
+function fit(){
+  let el=document.getElementById('term');
+  let w=el.clientWidth, h=el.clientHeight;
+  if(w<10||h<10)return;
+  // 创建测量元素
+  let m=document.createElement('span');
+  m.style.font=T.options.fontSize+'px '+T.options.fontFamily;
+  m.style.position='absolute';m.style.visibility='hidden';
+  m.textContent='W';document.body.appendChild(m);
+  let cw=m.getBoundingClientRect().width;
+  let ch=T.options.fontSize*1.35; // 行高比例
+  document.body.removeChild(m);
+  T.resize(Math.floor(w/cw), Math.floor(h/ch));
+}
+setTimeout(fit,100);setTimeout(fit,500);window.addEventListener('resize',fit);
+
+// Ctrl+滚轮缩放
+T.element.addEventListener('wheel',e=>{
+  if(e.ctrlKey){e.preventDefault();let s=T.options.fontSize||15;s+=e.deltaY>0?-1:1;if(s>=8&&s<=32){T.options.fontSize=s;fit()}}
+},{passive:false});
 
 const ps=document.getElementById('ps'),bs=document.getElementById('bs');
 const cb=document.getElementById('cb'),st=document.getElementById('st');
@@ -47,51 +74,63 @@ function connectWS(){
   ws=new WebSocket('ws://'+location.host+'/');
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{};
-  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer)T.write(new Uint8Array(e.data))};
+  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer){let b=new Uint8Array(e.data);T.write(b);log+=new TextDecoder().decode(b);if(log.length>1<<20)log=log.slice(-1<<19);}}
   ws.onclose=()=>{ws=null};
   ws.onerror=()=>{};
 }
 
-// 无本地回显 — 纯透传
-T.onData(data=>{
-  if(ws&&ws.readyState===WebSocket.OPEN)ws.send(data);
-});
+T.onData(data=>{if(ws&&ws.readyState===WebSocket.OPEN)ws.send(data)});
 
 async function tc(){
   if(conn){await dc();return}
   let p=ps.value;if(!p)return;
-  // 先发连接请求
   let r=await fetch(B+'/connect',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({port:p,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
   if(!r.ok){st.textContent='连接失败';return}
   conn=true;cb.textContent='断开';cb.style.background='#300';
-  st.textContent='已连接 '+p;connectWS();
+  st.textContent=p;connectWS();
 }
 async function dc(){
-  let r=await fetch(B+'/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
-  if(r.ok){if(ws)ws.close();ws=null;}
+  await fetch(B+'/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
+  if(ws)ws.close();ws=null;
   conn=false;cb.textContent='连接';cb.style.background='';st.textContent='未连接';
 }
 async function rp(){
-  try{let r=await fetch(B+'/ports');let a=await r.json();
-    ps.innerHTML='<option value="">-- 端口 --</option>';
-    a.forEach(p=>{let o=document.createElement('option');o.value=p.path;o.textContent=p.path;ps.appendChild(o)});
-  }catch(_){}
+  try{
+    let r=await fetch(B+'/ports');
+    if(!r.ok)throw new Error(r.status);
+    let a=await r.json();
+    let cur=ps.value;ps.innerHTML='<option value="">-- 端口 --</option>';
+    a.forEach(p=>{let o=document.createElement('option');o.value=p.path;
+      o.textContent=p.path+(p.manufacturer?' - '+p.manufacturer:'');if(p.path===cur)o.selected=true;ps.appendChild(o)});
+  }catch(e){
+    ps.innerHTML='<option value="">获取失败</option>';
+    T.write('Ports error: '+e.message+'\r\n');
+  }
 }
 async function init(){
-  rp();
+  await rp();
   try{let r=await fetch(B+'/status');let s=await r.json();
     if(s.connected){
       conn=true;cb.textContent='断开';cb.style.background='#300';
       ps.value=s.port||'';bs.value=String(s.baudRate||115200);
-      st.textContent='已连接 '+s.port;
-      connectWS();
-      // 自动成为控制端
-      await fetch(B+'/force-control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
+      st.textContent=s.port;connectWS();
+    }else{
+      T.write('等待连接...\r\n');
     }
-  }catch(_){}
+  }catch(_){T.write('等待连接...\r\n');}
 }
 init();
+
+async function copyText(){
+  let s=T.getSelection()||'';
+  if(!s)s=log.slice(-1<<15);
+  try{await navigator.clipboard.writeText(s);}catch(_){}
+}
+function saveText(){
+  let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([log],{type:'text/plain'}));
+  a.download='serial-'+new Date().toISOString().slice(0,19).replace(/[:]/g,'-')+'.txt';a.click();
+}
 </script>
 </body>
 </html>
