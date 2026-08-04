@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { SerialPort } from "serialport";
 import { SerialMonitor } from "./serial-monitor.js";
-import { startWebServer, openBrowser } from "./web-server.js";
+import { startWebServer, openBrowser, getLanIPs } from "./web-server.js";
 
 const SERIAL_PORT_ENV = process.env.SERIAL_PORT || "COM3";
 const SERIAL_BAUDRATE_ENV = parseInt(process.env.SERIAL_BAUDRATE || "115200", 10);
@@ -237,6 +237,13 @@ async function main(): Promise<void> {
   await server.connect(transport);
   console.error(`[MCP] Serial Terminal v${APP_VERSION}`);
   console.error(`[MCP] Web 终端: http://localhost:${WEB_PORT}`);
+  const LanIPs = getLanIPs();
+  if (LanIPs.length > 0) {
+    for (const Ip of LanIPs) {
+      console.error(`[MCP] 局域网访问: http://${Ip}:${WEB_PORT}`);
+    }
+    console.error(`[MCP] 提示: 防火墙需放行端口 ${WEB_PORT}`);
+  }
   console.error(`[MCP] 自动连接: ${AUTO_CONNECT ? "启用" : "禁用"}`);
   console.error(`[MCP] Web 自动打开: ${WEB_AUTO_OPEN ? "启用" : "禁用"}`);
 

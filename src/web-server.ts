@@ -1,4 +1,5 @@
 import * as http from "http";
+import * as os from "os";
 import { exec } from "child_process";
 import { WebSocketServer } from "ws";
 import { SerialMonitor } from "./serial-monitor.js";
@@ -40,6 +41,26 @@ export function openBrowser(url: string): boolean {
     });
   });
   return true;
+}
+
+// ============================================================================
+// 局域网 IP 检测
+// ============================================================================
+
+/** 获取本机局域网 IPv4 地址列表 */
+export function getLanIPs(): string[] {
+  const Result: string[] = [];
+  const Interfaces = os.networkInterfaces();
+  for (const Name of Object.keys(Interfaces)) {
+    const Ifaces = Interfaces[Name];
+    if (!Ifaces) continue;
+    for (const Iface of Ifaces) {
+      if (Iface.family === "IPv4" && !Iface.internal) {
+        Result.push(Iface.address);
+      }
+    }
+  }
+  return Result;
 }
 
 // ============================================================================
@@ -130,7 +151,7 @@ export function startWebServer(
 
     // GET /
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate" });
       res.end(getViewerHTML());
       return;
     }
@@ -144,11 +165,20 @@ export function startWebServer(
   const wss = new WebSocketServer({ server });
   wss.on("connection", (ws, req) => {
     const name = (req.headers["user-agent"] || "ws").slice(0, 20);
-    monitor.addWSClient(ws, name);
+    const wsUrl = new URL(req.url || "/", "http://localhost");
+    const clientId = wsUrl.searchParams.get("clientId") || undefined;
+    monitor.addWSClient(ws, name, clientId);
   });
 
-  server.listen(port, () => {
+  server.listen(port, "0.0.0.0", () => {
+    const LanIPs = getLanIPs();
     console.error(`[WebServer] 串口实时终端: http://localhost:${port}`);
+    if (LanIPs.length > 0) {
+      for (const Ip of LanIPs) {
+        console.error(`[WebServer] 局域网访问: http://${Ip}:${port}`);
+      }
+      console.error(`[WebServer] 提示: 如果局域网其他电脑无法访问，请检查 Windows 防火墙是否放行端口 ${port}`);
+    }
     if (autoOpenBrowser) {
       openBrowser(`http://localhost:${port}`);
     }
