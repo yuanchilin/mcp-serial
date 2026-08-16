@@ -1,0 +1,40 @@
+# Auto detect text files and normalize to LF — checkout as LF too (no CRLF on Windows)
+* text=auto eol=lf
+
+# Shell scripts — keep LF + executable on checkout
+*.sh text eol=lf
+*.ps1 text eol=lf
+
+# TypeScript / JavaScript
+*.ts text eol=lf
+*.js text eol=lf
+*.cts text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf
+*.d.ts text eol=lf
+
+# Web
+*.html text eol=lf
+*.css text eol=lf
+
+# Configuration
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+.editorconfig text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+
+# Git files
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Binary files — keep as-is
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

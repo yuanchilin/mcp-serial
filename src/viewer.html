@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>串口终端</title>
+<link rel="stylesheet" href="/vendor/xterm/xterm.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;height:100vh;display:flex;flex-direction:column}
+#bar{background:#111;padding:3px 8px;display:flex;gap:6px;align-items:center;font:11px Consolas,monospace;color:#c0c0c0;flex-shrink:0;border-bottom:1px solid #222}
+#bar select,#bar button{background:#000;color:#c0c0c0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
+#bar button:hover{background:#222}
+#bar .st{color:#888;margin-left:8px}
+#bar #ctrl{margin-left:auto}
+#tools.hidden{display:none}
+#term{height:calc(100vh - 30px);overflow:hidden}
+.xterm{height:100%}
+.xterm-viewport{height:100%!important}
+</style>
+</head>
+<body>
+<div id="bar">
+  <select id="ps"><option value="">-- 端口 --</option></select>
+  <button onclick="rp()">刷新</button>
+  <select id="bs">
+    <option value="9600">9600</option><option value="115200" selected>115200</option>
+    <option value="230400">230400</option><option value="460800">460800</option><option value="921600">921600</option>
+  </select>
+  <button id="cb" onclick="tc()">连接</button>
+    <span id="tools">
+  <button onclick="T.clear()">清除</button>
+  <button onclick="copyText()">复制</button>
+  <button onclick="saveText()">保存</button>
+  
+    <button onclick="reqCtrl()">申请控制</button>
+    <button onclick="forceCtrl()">强制控制</button>
+    <button id="tsBtn" onclick="toggleTs()">🕐 时间戳</button>
+    <button id="echoBtn" onclick="toggleEcho()">💬 回显</button>
+    </span>
+    <button id="foldBtn" onclick="toggleFold()">◀</button>
+    <span class="st" id="ctrl">👁 监视端</span>
+    <span class="st" id="st">未连接</span>
+</div>
+<div id="term"></div>
+
+<script src="/vendor/xterm/xterm.js"></script>
+<script>
+const QP=new URLSearchParams(location.search);
+const CID=QP.get('cid')||sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',crypto.randomUUID()),sessionStorage.getItem('xtermCid'));
+const B=window.location.origin;
+// SERIAL_WEB_TOKEN 透传：从 URL 读取 token，附加到所有 API 调用
+const TKN=new URLSearchParams(location.search).get('token')||'';
+function q(p){ return TKN ? p+(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TKN) : p; }
+let es=null;
+let currentPort=QP.get('port')||'';
+function connectSSE(){
+  if(!currentPort) return;
+  if(es) es.close();
+  es=new EventSource(B+q('/events?clientId='+encodeURIComponent(CID)+'&name=Browser&port='+encodeURIComponent(currentPort)));
+  es.onerror=()=>{};
+  es.addEventListener('status',e=>{
+    try{
+      const s=JSON.parse(e.data);
+      const isCtrl=s.controllerClientId===CID;
+      ctrl.textContent=isCtrl?'🎮 控制端':'👁 监视端';
+      ctrl.style.color=isCtrl?'#4caf50':'#888';
+    }catch(_){}
+  });
+  es.addEventListener('control-response',e=>{
+    try{
+      const d=JSON.parse(e.data);
+      T.write(`\r\n[${currentPort}] `+(d.approved?'✅ 已获得控制权':'❌ 申请被拒绝')+(d.autoApproved?'（超时自动同意）':'')+'\r\n');
+    }catch(_){}
+  });
+    es.addEventListener('control-request', async e=>{
+      try{
+        const d=JSON.parse(e.data);
+        const ok=confirm(`客户端请求控制 ${currentPort}，是否同意？`);
+        await fetch(B+q('/respond-control'),{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({port:currentPort,clientId:CID,requesterId:d.requesterId,approve:ok})});
+      }catch(_){}
+    });
+  es.addEventListener('control-taken',e=>{
+    try{
+      const d=JSON.parse(e.data);
+      if(d.newController===CID){
+        T.write(`\r\n[${currentPort}] 🎮 你已成为控制端`+(d.reason?`（${d.reason}）`:'')+'\r\n');
+      }else if(d.oldController===CID){
+        T.write(`\r\n[${currentPort}] 👁 控制权已移交\r\n`);
+      }
+    }catch(_){}
+  });
+}
+let ws=null,conn=false,log='',wsRetry=0,wsWarned=false,showTs=false,echo=false,atLineStart=true,folded=localStorage.getItem('mcpSerialFold')==='1';
+
+if(typeof Terminal==='undefined'){document.body.innerHTML='<h3 style="color:#f66;padding:20px">xterm 资源未加载，请先执行 npm run build</h3>';throw new Error('xterm not loaded');}
+const T=new Terminal({fontSize:15,fontFamily:'Consolas,Monaco,monospace',disableStdin:false,
+  theme:{background:'#000',foreground:'#c0c0c0',cursor:'#fff',selectionBackground:'#444',selectionForeground:'#fff'}});
+T.open(document.getElementById('term'));
+T.focus();
+
+// 全屏自适应 (实测字符尺寸)
+function fit(){
+  let el=document.getElementById('term');
+  let w=el.clientWidth, h=el.clientHeight;
+  if(w<10||h<10)return;
+  // 创建测量元素
+  let m=document.createElement('span');
+  m.style.font=T.options.fontSize+'px '+T.options.fontFamily;
+  m.style.position='absolute';m.style.visibility='hidden';
+  m.textContent='W';document.body.appendChild(m);
+  let cw=m.getBoundingClientRect().width;
+  let ch=T.options.fontSize*1.35; // 行高比例
+  document.body.removeChild(m);
+  T.resize(Math.floor(w/cw), Math.floor(h/ch));
+}
+setTimeout(fit,100);setTimeout(fit,500);window.addEventListener('resize',fit);
+
+// Ctrl+滚轮缩放
+T.element.addEventListener('wheel',e=>{
+  if(e.ctrlKey){e.preventDefault();let s=T.options.fontSize||15;s+=e.deltaY>0?-1:1;if(s>=8&&s<=32){T.options.fontSize=s;fit()}}
+},{passive:false});
+
+const ps=document.getElementById('ps'),bs=document.getElementById('bs');
+const cb=document.getElementById('cb'),st=document.getElementById('st'),ctrl=document.getElementById('ctrl'),tsBtn=document.getElementById('tsBtn'),echoBtn=document.getElementById('echoBtn'),foldBtn=document.getElementById('foldBtn');
+if(folded){document.getElementById('tools').classList.add('hidden');foldBtn.textContent='▶';}
+if(QP.get('embed')==='1'){document.getElementById('bar').style.display='none';document.getElementById('term').style.height='100vh';}
+
+function ts(){return '['+new Date().toLocaleTimeString('zh-CN',{hour12:false})+'.'+String(Date.now()%1000).padStart(3,'0')+'] ';}
+
+function connectWS(){
+  if(ws){try{ws.close()}catch(_){}}
+  ws=new WebSocket('ws://'+location.host+q('/?clientId='+encodeURIComponent(CID)+'&port='+encodeURIComponent(currentPort)));
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{wsRetry=0;if(conn)st.textContent=(ps.value||'已连接')+' · WS在线'};
+  ws.onmessage=e=>{
+  if(e.data instanceof ArrayBuffer){
+    let b=lf2crlf(new Uint8Array(e.data));
+    let text=new TextDecoder().decode(b);
+    if(showTs){
+      let out=''; let rest=text; while(true){ const idx=rest.indexOf('\n'); if(idx<0){ if(rest.length>0){ if(atLineStart) out+=ts(); out+=rest; atLineStart=false; } break; } const line=rest.slice(0,idx+1); rest=rest.slice(idx+1); if(atLineStart) out+=ts(); out+=line; atLineStart=true; }
+      b=lf2crlf(new TextEncoder().encode(out));
+      text=out;
+    }
+      else {
+        if(text.length>0) atLineStart=text.endsWith('\n');
+      }
+    T.write(b);
+    log+=text;
+    if(log.length>1<<20)log=log.slice(-1<<19);
+  }
+}
+  ws.onclose=()=>{
+    ws=null;
+    if(conn){
+      wsRetry++;
+      if(wsRetry<=10){st.textContent='WS 已断开，重连中('+wsRetry+')...';setTimeout(connectWS,2000);}
+      else{conn=false;cb.textContent='连接';cb.style.background='';st.textContent='WS 连接失败，请刷新页面';}
+    }else{st.textContent='未连接';}
+};
+
+// 设备常只发 LF(\n)：转成 CRLF(\r\n)，避免 xterm 只下移不回车导致行首错位（已含 \r 的保持原样）
+function lf2crlf(b){
+  const out=[];
+  for(let i=0;i<b.length;i++){
+    if(b[i]===0x0A&&(i===0||b[i-1]!==0x0D))out.push(0x0D);
+    out.push(b[i]);
+  }
+  return new Uint8Array(out);
+}
+  ws.onerror=()=>{};
+}
+
+// 输入：xterm 官方 onData 通道（统一处理普通按键/IME 组合/粘贴），直通串口
+// disableStdin 必须为 false 才会产生 onData；xterm 不把按键写入本地缓冲区（无本地回显）
+T.onData(d=>{
+  if(echo&&d)T.write(d);
+  if(d&&ws&&ws.readyState===WebSocket.OPEN){ws.send(d)}
+  else if(!wsWarned){wsWarned=true;T.write('\r\n[未连接或连接已断开：请点击“连接”或刷新页面]\r\n')}
+});
+
+async function tc(){
+  if(conn){await dc();return}
+  let p=ps.value;if(!p)return;
+    currentPort=p;connectSSE();
+  // 乐观更新：点击立即反馈，失败再回滚
+  conn=true;cb.textContent='断开';cb.style.background='#300';st.textContent=p+' · 连接中...';
+  let r=await fetch(B+q('/connect'),{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({port:p,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
+  if(!r.ok){
+    conn=false;cb.textContent='连接';cb.style.background='';st.textContent='连接失败';
+    return;
+  }
+  st.textContent=p;connectWS();T.focus();
+    if(window.parent!==window) parent.postMessage({type:'mcpSerialStatus',port:currentPort,connected:true},'*');
+}
+async function dc(){
+  // 乐观更新：点击立即反馈
+  conn=false;cb.textContent='连接';cb.style.background='';st.textContent='断开中...';
+  try{
+    const r=await fetch(B+q('/disconnect'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:currentPort,clientId:CID})});
+    if(!r.ok){
+      const j=await r.json().catch(()=>({}));
+      conn=true;cb.textContent='断开';cb.style.background='#300';st.textContent=currentPort;
+      T.write(`\r\n[${currentPort}] 断开失败: ${j.error||r.status}\r\n`);
+      return;
+    }
+  }catch(e){
+    conn=true;cb.textContent='断开';cb.style.background='#300';st.textContent=currentPort;
+    T.write(`\r\n[${currentPort}] 断开失败: ${e.message}\r\n`);
+    return;
+  }
+  if(ws)ws.close();ws=null;
+  if(es)es.close();es=null;
+  st.textContent='未连接';
+  T.write(`\r\n[${currentPort}] 已断开\r\n`);
+  if(window.parent!==window) parent.postMessage({type:'mcpSerialStatus',port:currentPort,connected:false},'*');
+}
+async function reqCtrl(){
+  try{
+    const r=await fetch(B+q('/request-control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:currentPort,clientId:CID})});
+    const j=await r.json().catch(()=>({}));
+    T.write('\r\n[控制] '+(j.message||('HTTP '+r.status))+'\r\n');
+  }catch(e){T.write('\r\n[控制] 申请失败: '+e.message+'\r\n');}
+}
+async function forceCtrl(){
+  try{
+    const r=await fetch(B+q('/force-control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:currentPort,clientId:CID})});
+    const j=await r.json().catch(()=>({}));
+    T.write('\r\n[控制] '+(j.message||('HTTP '+r.status))+'\r\n');
+  }catch(e){T.write('\r\n[控制] 强制接管失败: '+e.message+'\r\n');}
+}
+function toggleTs(){
+  showTs=!showTs;
+  tsBtn.textContent=showTs?'🕐 时间戳:开':'🕐 时间戳';
+  T.write('\r\n[时间戳] '+(showTs?'已开启':'已关闭')+'\r\n');
+}
+function toggleEcho(){
+  echo=!echo;
+  echoBtn.textContent=echo?'💬 回显:开':'💬 回显';
+  T.write('\r\n[回显] '+(echo?'已开启':'已关闭')+'\r\n');
+}
+function toggleFold(){
+  folded=!folded;
+  localStorage.setItem('mcpSerialFold', folded?'1':'0');
+  document.getElementById('tools').classList.toggle('hidden', folded);
+  foldBtn.textContent=folded?'▶':'◀';
+}
+
+async function rp(){
+  try{
+    let r=await fetch(B+q('/ports'));
+    if(!r.ok)throw new Error(r.status);
+    let a=await r.json();
+    let cur=ps.value;ps.innerHTML='<option value="">-- 端口 --</option>';
+    a.forEach(p=>{let o=document.createElement('option');o.value=p.path;
+      o.textContent=p.path+(p.manufacturer?' - '+p.manufacturer:'');if(p.path===cur)o.selected=true;ps.appendChild(o)});
+  }catch(e){
+    ps.innerHTML='<option value="">获取失败</option>';
+    T.write('Ports error: '+e.message+'\r\n');
+  }
+}
+async function init(){
+  await rp();
+  try{
+      let s;
+      if(currentPort){
+        const sr=await fetch(B+q('/status?port='+encodeURIComponent(currentPort)));
+        s=await sr.json();
+      }else{
+        const r=await fetch(B+q('/status'));
+        const list=await r.json();
+        const arr=Array.isArray(list)?list:(list.connected?[list]:[]);
+        const active=arr.filter(x=>x.connected);
+        s=active[0]||{};
+        if(s.port) currentPort=s.port;
+      }
+      const isCtrl=s.controllerClientId===CID;
+      ctrl.textContent=isCtrl?'🎮 控制端':'👁 监视端';
+      ctrl.style.color=isCtrl?'#4caf50':'#888';
+    if(s.connected){
+      conn=true;cb.textContent='断开';cb.style.background='#300';
+      ps.value=s.port||'';bs.value=String(s.baudRate||115200);
+      st.textContent=s.port;connectSSE();connectWS();
+    }else{
+        const q=new URLSearchParams(location.search).get('port');
+        if(q){currentPort=q;ps.value=q;connectSSE();}
+      T.write('等待连接...\r\n');
+    }
+  }catch(_){T.write('等待连接...\r\n');}
+}
+init();
+if(QP.get('auto')==='1' && QP.get('port')){
+  setTimeout(()=>{
+    if(!conn){
+      ps.value=QP.get('port');
+      tc();
+    }
+  }, 300);
+}
+
+async function copyText(){
+  let s=T.getSelection()||'';
+  if(!s)s=log.slice(-1<<15);
+  try{await navigator.clipboard.writeText(s);}catch(_){}
+}
+function saveText(){
+  let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([log],{type:'text/plain'}));
+  a.download='serial-'+new Date().toISOString().slice(0,19).replace(/[:]/g,'-')+'.txt';a.click();
+}
+</script>
+</body>
+</html>

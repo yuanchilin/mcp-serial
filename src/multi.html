@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>串口终端 - 多串口</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;height:100vh;display:flex;flex-direction:column}
+#bar{background:#111;padding:3px 8px;display:flex;gap:6px;align-items:center;font:11px Consolas,monospace;color:#c0c0c0;flex-shrink:0;border-bottom:1px solid #222}
+#bar select,#bar button{background:#000;color:#c0c0c0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
+#bar button:hover{background:#222}
+#bar .st{color:#888;margin-left:auto}
+#miniBar{display:flex;gap:4px;align-items:center;margin-left:8px}
+#miniBar button{background:#181818;color:#4caf50}
+#panes{flex:1;position:relative;overflow:auto}
+.pane{position:absolute;width:600px;min-width:260px;height:100%;display:flex;flex-direction:row;align-items:stretch;border-right:1px solid #222;border-bottom:1px solid #222;background:#000}
+.pane-core{flex:1;min-width:0;display:flex;flex-direction:column}
+.pane-head{display:flex;align-items:center;gap:4px;padding:2px 6px;background:#181818;color:#aaa;font:11px Consolas,monospace;border-bottom:1px solid #222;flex-wrap:wrap;cursor:grab}
+.pane.floating .pane-head{cursor:move}
+.pane-head .pane-title{color:#4caf50;font-weight:bold;margin-right:4px}
+.pane-head button{background:#222;color:#ccc;border:1px solid #333;padding:1px 5px;cursor:pointer;font-size:10px}
+.pane-head button:hover{background:#333}
+.pane-head button.close{background:#300;color:#fff;margin-left:auto}
+.pane-head input[type=range]{width:60px;background:#000}
+.pane-body{flex:1;display:flex;min-height:100px}
+.pane iframe{flex:1;border:none;width:100%;background:#000;min-height:100px}
+.pane-resizer{width:6px;cursor:col-resize;background:#333;flex-shrink:0;align-self:stretch}
+.pane-resizer:hover{background:#4caf50}
+
+/* 浮动窗口 */
+.pane.floating{position:fixed;z-index:1000;border:1px solid #444;box-shadow:0 8px 32px rgba(0,0,0,.65);min-width:320px;min-height:240px;width:640px;height:480px}
+.pane.floating .pane-core{height:100%}
+.pane.floating .pane-body{flex:1;min-height:0}
+.pane.floating .pane-resizer{display:none}
+
+/* 四向拉升手柄（浮动时显示） */
+.rz{position:absolute;display:none;z-index:2}
+.pane.floating .rz{display:block}
+.rz-n{top:0;left:12px;right:12px;height:5px;cursor:n-resize}
+.rz-s{bottom:0;left:12px;right:12px;height:5px;cursor:s-resize}
+.rz-e{right:0;top:12px;bottom:12px;width:5px;cursor:e-resize}
+.rz-w{left:0;top:12px;bottom:12px;width:5px;cursor:w-resize}
+.rz-ne{top:0;right:0;width:12px;height:12px;cursor:ne-resize}
+.rz-nw{top:0;left:0;width:12px;height:12px;cursor:nw-resize}
+.rz-se{bottom:0;right:0;width:12px;height:12px;cursor:se-resize}
+.rz-sw{bottom:0;left:0;width:12px;height:12px;cursor:sw-resize}
+</style>
+</head>
+<body>
+<div id="bar">
+  <select id="ps"><option value="">-- 端口 --</option></select>
+  <button onclick="rp()">刷新</button>
+  <select id="bs">
+    <option value="9600">9600</option><option value="115200" selected>115200</option>
+    <option value="230400">230400</option><option value="460800">460800</option><option value="921600">921600</option>
+  </select>
+  <button id="cb" onclick="openPort()">连接新串口</button>
+  <span class="st" id="st">未连接</span>
+  <span id="miniBar"></span>
+</div>
+<div id="panes"></div>
+
+<script>
+const B=window.location.origin;
+const ps=document.getElementById('ps'),bs=document.getElementById('bs'),st=document.getElementById('st'),cb=document.getElementById('cb'),panes=document.getElementById('panes'),miniBar=document.getElementById('miniBar');
+const sessions=new Map(); // port -> {pane, floating, folded}
+
+function getCID(){
+  let cid=sessionStorage.getItem('mcpSerialCid');
+  if(!cid){cid=crypto.randomUUID();sessionStorage.setItem('mcpSerialCid',cid);}
+  return cid;
+}
+const CID=getCID();
+
+// SERIAL_WEB_TOKEN 透传：从本页 URL 读取 token，附加到所有 API 调用与 iframe 地址
+const TKN=new URLSearchParams(location.search).get('token')||'';
+function q(p){ return TKN ? p+(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TKN) : p; }
+
+window.addEventListener('message',e=>{
+  const d=e.data;
+  if(!d||d.type!=='mcpSerialStatus')return;
+  const s=sessions.get(d.port);
+  if(!s)return;
+  const pane=s.pane;
+  pane.dataset.connected=d.connected?'1':'0';
+  const btn=pane.querySelector('.conn-btn');
+  if(btn)btn.textContent=d.connected?'断开':'连接';
+});
+
+function escapeHtml(str){
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escapeAttr(str){
+  return String(str).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+}
+
+function iframeWin(port){
+  const s=sessions.get(port);
+  return s ? s.pane.querySelector('iframe').contentWindow : null;
+}
+
+function addPane(port){
+  if(sessions.has(port)){
+    const s=sessions.get(port);
+    s.folded=false; s.pane.style.display=''; renderMini();
+    s.pane.querySelector('iframe').contentWindow.focus();
+    return;
+  }
+  const pane=document.createElement('div');
+  pane.className='pane';
+  pane.dataset.connected='1';
+  pane.innerHTML=`
+    <div class="pane-core">
+      <div class="pane-head" onmousedown="startHeadDrag(event,'${escapeAttr(port)}')">
+        <span class="pane-title">${escapeHtml(port)}</span>
+        <button class="conn-btn" title="连接/断开串口（保留面板）" onmousedown="event.stopPropagation()" onclick="toggleConnect('${escapeAttr(port)}')">断开</button>
+        <button title="申请控制" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','reqCtrl')">申请</button>
+        <button title="强制控制" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','forceCtrl')">强控</button>
+        <button title="时间戳" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','toggleTs')">🕐</button>
+        <button title="回显" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','toggleEcho')">💬</button>
+        <button title="清屏" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','clearScreen')">清屏</button>
+        <button title="复制" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','copyText')">复制</button>
+        <button title="保存" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','saveText')">保存</button>
+        <input type="range" min="20" max="100" value="50" title="调整宽度" onmousedown="event.stopPropagation()" oninput="setPaneWidth('${escapeAttr(port)}',this.value)">
+        <button title="浮动/停靠" onmousedown="event.stopPropagation()" onclick="toggleFloat('${escapeAttr(port)}')">⧉</button>
+        <button title="全屏" onmousedown="event.stopPropagation()" onclick="toggleFullscreen('${escapeAttr(port)}')">⛶</button>
+        <button class="close" title="折叠到工具栏" onmousedown="event.stopPropagation()" onclick="foldPane('${escapeAttr(port)}')">✕</button>
+      </div>
+      <div class="pane-body"><iframe src="${q('/viewer.html?port='+encodeURIComponent(port)+'&auto=1&embed=1&cid='+encodeURIComponent(CID))}"></iframe></div>
+    </div>
+    <div class="pane-resizer" onmousedown="startResize(event,'${escapeAttr(port)}')"></div>
+    <div class="rz rz-n" onmousedown="startRz(event,'n','${escapeAttr(port)}')"></div>
+    <div class="rz rz-s" onmousedown="startRz(event,'s','${escapeAttr(port)}')"></div>
+    <div class="rz rz-e" onmousedown="startRz(event,'e','${escapeAttr(port)}')"></div>
+    <div class="rz rz-w" onmousedown="startRz(event,'w','${escapeAttr(port)}')"></div>
+    <div class="rz rz-ne" onmousedown="startRz(event,'ne','${escapeAttr(port)}')"></div>
+    <div class="rz rz-nw" onmousedown="startRz(event,'nw','${escapeAttr(port)}')"></div>
+    <div class="rz rz-se" onmousedown="startRz(event,'se','${escapeAttr(port)}')"></div>
+    <div class="rz rz-sw" onmousedown="startRz(event,'sw','${escapeAttr(port)}')"></div>
+  `;
+  panes.appendChild(pane);
+  pane.addEventListener('mousedown', ()=>raisePane(port)); // 点击即置顶（重叠时选择谁在 top）
+  const s={pane,floating:false,folded:false};
+  sessions.set(port,s);
+  applyLayout(port,s);   // 恢复上次保存的布局（浮动/宽度/折叠），无保存则自动找空位
+  renderMini();
+  st.textContent=Array.from(sessions.keys()).join(', ');
+  cb.textContent='连接新串口';
+}
+
+// ---- 布局持久化（刷新/重进页面恢复用户布局） ----
+const LAYOUT_KEY='mcpSerialLayout';
+function loadLayout(){
+  try{ return JSON.parse(localStorage.getItem(LAYOUT_KEY)||'{}'); }catch(_){ return {}; }
+}
+function saveLayout(){
+  const data=loadLayout();
+  const container=panes.getBoundingClientRect();
+  for(const [port,s] of sessions){
+    const pane=s.pane;
+    const r=pane.getBoundingClientRect();
+    data[port]={
+      floating:s.floating,
+      folded:s.folded,
+      x:s.floating?(parseFloat(pane.style.left)||r.left):(parseFloat(pane.style.left)||(r.left-container.left)),
+      y:s.floating?(parseFloat(pane.style.top)||r.top):(parseFloat(pane.style.top)||(r.top-container.top)),
+      w:s.floating?(parseFloat(pane.style.width)||r.width):null,
+      h:s.floating?(parseFloat(pane.style.height)||r.height):null,
+      gridW:s.floating?null:(parseFloat(pane.style.width)||r.width),
+    };
+  }
+  localStorage.setItem(LAYOUT_KEY, JSON.stringify(data));
+}
+function applyLayout(port,s){
+  const saved=loadLayout()[port];
+  if(!saved){ placePane(s.pane); return; } // 新面板：自动找空位
+  const pane=s.pane;
+  if(saved.folded){
+    s.folded=true;
+    pane.style.display='none';
+  }
+  if(saved.floating){
+    s.floating=true;
+    pane.classList.add('floating');
+    if(saved.x!=null)pane.style.left=saved.x+'px';
+    if(saved.y!=null)pane.style.top=saved.y+'px';
+    if(saved.w)pane.style.width=saved.w+'px';
+    if(saved.h)pane.style.height=saved.h+'px';
+  }else{
+    if(saved.gridW)pane.style.width=saved.gridW+'px';
+    if(saved.x!=null)pane.style.left=saved.x+'px';
+    if(saved.y!=null)pane.style.top=saved.y+'px';
+    else placePane(pane);
+  }
+}
+// ---- 停靠窗口绝对定位：自动找空位放置（调整大小互不影响） ----
+function placePane(pane){
+  const container=panes.getBoundingClientRect();
+  const W=parseFloat(pane.style.width)||600;
+  const rows={};
+  for(const s of sessions.values()){
+    if(s.pane===pane||s.folded) continue;
+    const r=s.pane.getBoundingClientRect();
+    const ly=Math.round(r.top-container.top);
+    (rows[ly]=rows[ly]||[]).push({x:r.left-container.left, w:r.width});
+  }
+  const ys=Object.keys(rows).map(Number).sort((a,b)=>a-b);
+  let y=0;
+  for(let guard=0; guard<50; guard++){
+    const list=(rows[y]||[]).sort((a,b)=>a.x-b.x);
+    let x=0, fits=true;
+    for(const t of list){
+      if(x+W<=t.x+2) break;
+      x=Math.max(x, t.x+t.w);
+      if(x+W>container.width+2){ fits=false; break; }
+    }
+    if(fits){ pane.style.left=x+'px'; pane.style.top=y+'px'; return; }
+    y+=container.height;
+  }
+  pane.style.left='0px'; pane.style.top='0px';
+}
+// ---- 置顶：重叠的浮动窗口点击谁谁在 top ----
+let zTop=1000;
+function raisePane(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  s.pane.style.zIndex=++zTop;
+}
+
+function toggleConnect(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  const pane=s.pane;
+  const isConnected=pane.dataset.connected==='1';
+  const btn=pane.querySelector('.conn-btn');
+  // 乐观更新按钮状态，iframe postMessage 回报真实结果后校正
+  if(isConnected){
+    if(btn)btn.textContent='连接';
+    pane.dataset.connected='0';
+    iframeCall(port,'dc');
+  }else{
+    if(btn)btn.textContent='断开';
+    pane.dataset.connected='1';
+    iframeCall(port,'tc');
+  }
+}
+
+// ---- 网格左右调宽 ----
+let resizeState=null;
+function startResize(e,port){
+  e.preventDefault(); e.stopPropagation();
+  const s=sessions.get(port);
+  if(!s)return;
+  const startX=e.clientX;
+  const startW=s.pane.getBoundingClientRect().width;
+  resizeState={port,startX,startW,active:false};
+  window.addEventListener('mousemove',onResize);
+  window.addEventListener('mouseup',stopResize);
+}
+function onResize(e){
+  if(!resizeState)return;
+  const {port,startX,startW}=resizeState;
+  const s=sessions.get(port);
+  if(!s)return;
+  if(!resizeState.active){ resizeState.active=true; setDragMode(s.pane, true); }
+  const w=Math.max(220, startW+(e.clientX-startX));
+  s.pane.style.width=w+'px';
+}
+function stopResize(){
+  if(resizeState) setDragMode(sessions.get(resizeState.port)?.pane, false);
+  resizeState=null;
+  window.removeEventListener('mousemove',onResize);
+  window.removeEventListener('mouseup',stopResize);
+  saveLayout();
+}
+
+function setPaneWidth(port,value){
+  const s=sessions.get(port);
+  if(!s)return;
+  const containerW=panes.clientWidth;
+  s.pane.style.width=Math.round(containerW*value/100)+'px';
+  saveLayout();
+}
+
+// ---- 拖拽标题：拖出网格 → 浮动；浮动窗口 → 移动 ----
+function startHeadDrag(e,port){
+  if(e.target.closest('button,input')) return;
+  const s=sessions.get(port);
+  if(!s)return;
+  if(s.floating){ startFloatMove(e,port); return; }
+  const panesRect=panes.getBoundingClientRect();
+  let floated=false, active=false;
+  const mm=(ev)=>{
+    if(!active){ active=true; setDragMode(s.pane, true); }
+    if(floated){ moveFloating(ev,port); return; }
+    const out = ev.clientX < panesRect.left-20 || ev.clientX > panesRect.right+20 ||
+                ev.clientY < panesRect.top-20 || ev.clientY > panesRect.bottom+20;
+    if(out){
+      floatPane(port, ev.clientX-80, ev.clientY-14);
+      floated=true;
+      s.dragOffX=80; s.dragOffY=14;
+    }
+  };
+  const mu=()=>{ setDragMode(s.pane,false); window.removeEventListener('mousemove',mm); window.removeEventListener('mouseup',mu); saveLayout(); };
+  window.addEventListener('mousemove',mm);
+  window.addEventListener('mouseup',mu);
+}
+function startFloatMove(e,port){
+  const s=sessions.get(port);
+  const rect=s.pane.getBoundingClientRect();
+  s.dragOffX=e.clientX-rect.left;
+  s.dragOffY=e.clientY-rect.top;
+  let active=false;
+  const mm=(ev)=>{ if(!active){ active=true; setDragMode(s.pane,true); } moveFloating(ev,port); };
+  const mu=()=>{ setDragMode(s.pane,false); window.removeEventListener('mousemove',mm); window.removeEventListener('mouseup',mu); saveLayout(); };
+  window.addEventListener('mousemove',mm);
+  window.addEventListener('mouseup',mu);
+}
+function moveFloating(e,port){
+  const s=sessions.get(port);
+  s.pane.style.left=Math.max(0, e.clientX-s.dragOffX)+'px';
+  s.pane.style.top=Math.max(0, e.clientY-s.dragOffY)+'px';
+}
+function floatPane(port,x,y){
+  const s=sessions.get(port);
+  const pane=s.pane;
+  const rect=pane.getBoundingClientRect();
+  s.floating=true;
+  pane.classList.add('floating');
+  pane.style.left=(x ?? rect.left)+'px';
+  pane.style.top=(y ?? rect.top)+'px';
+  pane.style.width=Math.max(360, rect.width)+'px';
+  pane.style.height=Math.max(260, rect.height)+'px';
+  saveLayout();
+}
+function dockPane(port){
+  const s=sessions.get(port);
+  const pane=s.pane;
+  s.floating=false;
+  pane.classList.remove('floating');
+  pane.style.left=''; pane.style.top=''; pane.style.height='';
+  placePane(pane); // 回网格自动找空位
+  saveLayout();
+}
+function toggleFloat(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  if(s.floating) dockPane(port);
+  else{
+    const r=s.pane.getBoundingClientRect();
+    floatPane(port, Math.max(20, r.left+40), Math.max(20, r.top+40));
+  }
+}
+
+function toggleFullscreen(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  if(document.fullscreenElement){
+    document.exitFullscreen();
+  }else if(s.pane.requestFullscreen){
+    s.pane.requestFullscreen();
+  }
+}
+
+// 拖拽/拉升期间禁用 iframe 指针事件，防止 mouseup 被 iframe 吞掉导致监听残留
+function setDragMode(pane,on){
+  const ifr=pane?.querySelector('iframe');
+  if(ifr) ifr.style.pointerEvents = on ? 'none' : '';
+}
+// 全局兜底：任何 mouseup / 窗口失焦都恢复所有 iframe（幂等，杜绝任何路径残留 pointer-events:none）
+window.addEventListener('mouseup', ()=>{ for(const s of sessions.values()) setDragMode(s.pane,false); });
+window.addEventListener('blur', ()=>{ for(const s of sessions.values()) setDragMode(s.pane,false); });
+
+// ---- 浮动窗口四向拉升 ----
+function startRz(e,dir,port){
+  e.preventDefault(); e.stopPropagation();
+  const s=sessions.get(port);
+  if(!s)return;
+  const pane=s.pane;
+  const startX=e.clientX, startY=e.clientY;
+  const rect=pane.getBoundingClientRect();
+  let active=false;
+  const mm=(ev)=>{
+    if(!active){ active=true; setDragMode(pane, true); }
+    const dx=ev.clientX-startX, dy=ev.clientY-startY;
+    let left=rect.left, top=rect.top, width=rect.width, height=rect.height;
+    if(dir.includes('e')) width=rect.width+dx;
+    if(dir.includes('s')) height=rect.height+dy;
+    if(dir.includes('w')){ left=rect.left+dx; width=rect.width-dx; }
+    if(dir.includes('n')){ top=rect.top+dy; height=rect.height-dy; }
+    if(width>=320){ pane.style.width=width+'px'; if(dir.includes('w')) pane.style.left=left+'px'; }
+    if(height>=240){ pane.style.height=height+'px'; if(dir.includes('n')) pane.style.top=top+'px'; }
+  };
+  const mu=()=>{ setDragMode(pane,false); window.removeEventListener('mousemove',mm); window.removeEventListener('mouseup',mu); saveLayout(); };
+  window.addEventListener('mousemove',mm);
+  window.addEventListener('mouseup',mu);
+}
+
+// ---- 折叠到工具栏 ----
+function foldPane(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  s.folded=true;
+  s.pane.style.display='none';
+  renderMini();
+  saveLayout();
+}
+function restorePane(port){
+  const s=sessions.get(port);
+  if(!s)return;
+  s.folded=false;
+  s.pane.style.display='';
+  renderMini();
+  saveLayout();
+}
+function renderMini(){
+  miniBar.innerHTML='';
+  for(const [port,s] of sessions){
+    if(s.folded){
+      const b=document.createElement('button');
+      b.textContent='▤ '+port;
+      b.title='展开 '+port+'（串口保持连接）';
+      b.onclick=()=>restorePane(port);
+      miniBar.appendChild(b);
+    }
+  }
+}
+
+function iframeCall(port,fn){
+  const win=iframeWin(port);
+  if(!win)return;
+  try{
+    if(fn==='clearScreen' && win.T){
+      win.T.clear();
+    }else if(typeof win[fn]==='function'){
+      win[fn]();
+    }
+  }catch(_){}
+}
+
+async function openPort(){
+  const port=ps.value;
+  if(!port)return;
+  if(sessions.has(port)){
+    const s=sessions.get(port);
+    s.folded=false; s.pane.style.display=''; renderMini();
+    s.pane.querySelector('iframe').contentWindow.focus();
+    return;
+  }
+    try{
+      const sr=await fetch(q('/status?port='+encodeURIComponent(port)));
+      const sj=await sr.json();
+      if(sj.connected){addPane(port);return;}
+    }catch(_){}
+  const r=await fetch(q('/connect'),{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({port:port,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
+  if(!r.ok){st.textContent='连接失败';return;}
+  addPane(port);
+}
+
+async function rp(){
+  try{
+    const r=await fetch(q('/ports'));
+    if(!r.ok)throw new Error(r.status);
+    const a=await r.json();
+    const cur=ps.value;
+    ps.innerHTML='<option value="">-- 端口 --</option>';
+    a.forEach(p=>{
+      const o=document.createElement('option');
+      o.value=p.path;
+      o.textContent=p.path+(p.manufacturer?' - '+p.manufacturer:'');
+      if(p.path===cur)o.selected=true;
+      ps.appendChild(o);
+    });
+  }catch(e){
+    ps.innerHTML='<option value="">获取失败</option>';
+  }
+}
+
+async function init(){
+  await rp();
+  try{
+    const r=await fetch(q('/status'));
+    const list=await r.json();
+    const arr=Array.isArray(list)?list:(list.connected?[list]:[]);
+    const active=arr.filter(s=>s.connected);
+    for(const s of active) addPane(s.port);
+    if(active.length>0){
+      ps.value=active[0].port;
+      st.textContent=active.map(s=>s.port).join(', ');
+    }else{
+      const q=new URLSearchParams(location.search).get('port');
+      if(q)ps.value=q;
+      st.textContent='未连接';
+    }
+  }catch(_){
+    st.textContent='未连接';
+  }
+}
+init();
+</script>
+</body>
+</html>

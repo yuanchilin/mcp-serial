@@ -1,0 +1,14 @@
+node_modules/
+build/
+*.env
+.npmrc
+
+# 联调工具/产物，不建议入库
+dev.bat
+mailbox/
+patches/
+tools/
+handoff/
+
+# 个人开发环境约定文档（不随项目发布）
+ENVIRONMENT.md
