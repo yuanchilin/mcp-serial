@@ -14,6 +14,12 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
 #bar .st{color:#888;margin-left:8px}
 #bar #ctrl{margin-left:auto}
 #tools.hidden{display:none}
+/* 控制申请弹框（confirm() 在 iframe 中会被浏览器拦截，且 embed 模式隐藏工具栏，故用自定义模态框） */
+#ctrlModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
+#ctrlModal .box{background:#1a1a1a;border:1px solid #555;border-radius:6px;padding:16px 20px;color:#c0c0c0;font:13px Consolas,monospace;min-width:280px;box-shadow:0 4px 20px rgba(0,0,0,.7)}
+#ctrlModal .msg{margin-bottom:14px;line-height:1.5}
+#ctrlModal .btns{display:flex;gap:10px;justify-content:flex-end}
+#ctrlModal button{border:none;padding:5px 18px;cursor:pointer;border-radius:3px;color:#fff;font:inherit}
 #term{height:calc(100vh - 30px);overflow:hidden}
 .xterm{height:100%}
 .xterm-viewport{height:100%!important}
@@ -43,22 +49,58 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
     <span class="st" id="st">未连接</span>
 </div>
 <div id="term"></div>
+<div id="ctrlModal">
+  <div class="box">
+    <div class="msg" id="ctrlModalMsg"></div>
+    <div class="btns">
+      <button onclick="respondCtrl(true)" style="background:#4caf50">同意</button>
+      <button onclick="respondCtrl(false)" style="background:#f44336">拒绝</button>
+    </div>
+  </div>
+</div>
 
 <script src="/vendor/xterm/xterm.js"></script>
 <script>
 const QP=new URLSearchParams(location.search);
-const CID=QP.get('cid')||sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',crypto.randomUUID()),sessionStorage.getItem('xtermCid'));
+const CID=QP.get('cid')||sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():'cid-'+Date.now()+'-'+Math.random().toString(36).slice(2,11)),sessionStorage.getItem('xtermCid'));
 const B=window.location.origin;
 // SERIAL_WEB_TOKEN 透传：从 URL 读取 token，附加到所有 API 调用
 const TKN=new URLSearchParams(location.search).get('token')||'';
 function q(p){ return TKN ? p+(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TKN) : p; }
 let es=null;
 let currentPort=QP.get('port')||'';
+let isFirstSSEMessage=true; // 标记是否为首次 SSE 消息（用于区分历史数据和实时数据）
+let sseConnecting=false; // 防止 connectSSE 被并发调用导致连接被反复关闭重建
+let initDone=false; // 标记 init() 是否已完成，避免 auto=1 场景下 tc() 和 init() 竞争
+// 点击终端区域时，向父页面发送置顶请求（用于多窗口覆盖时选择顶层）
+document.addEventListener('mousedown',()=>{
+  if(window.parent!==window&&currentPort){
+    parent.postMessage({type:'mcpSerialRaise',port:currentPort},'*');
+  }
+},true); // 捕获阶段，确保在 iframe 内部任何位置点击都能触发
+
 function connectSSE(){
-  if(!currentPort) return;
+  if(!currentPort||sseConnecting) return;
+  sseConnecting=true;
   if(es) es.close();
+  isFirstSSEMessage=true;
   es=new EventSource(B+q('/events?clientId='+encodeURIComponent(CID)+'&name=Browser&port='+encodeURIComponent(currentPort)));
-  es.onerror=()=>{};
+  es.onopen=()=>{ sseConnecting=false; };
+  es.onerror=()=>{ sseConnecting=false; };
+  // 处理默认 message 事件（SSE 无 event: 行的数据，包含历史缓冲区和实时串口数据）
+  // 注意：实时串口数据由 WebSocket 处理，SSE 仅用于恢复历史缓冲区（刷新不清屏）
+  es.onmessage=e=>{
+    try{
+      const d=JSON.parse(e.data);
+      if(d.text&&isFirstSSEMessage){
+        // 首次消息：历史缓冲区数据，静默恢复不清屏
+        isFirstSSEMessage=false;
+        T.write(d.text);
+        log+=d.text;
+      }
+      // 后续 SSE 消息忽略（WebSocket 会处理实时数据，避免重复显示）
+    }catch(_){}
+  };
   es.addEventListener('status',e=>{
     try{
       const s=JSON.parse(e.data);
@@ -73,17 +115,31 @@ function connectSSE(){
       T.write(`\r\n[${currentPort}] `+(d.approved?'✅ 已获得控制权':'❌ 申请被拒绝')+(d.autoApproved?'（超时自动同意）':'')+'\r\n');
     }catch(_){}
   });
-    es.addEventListener('control-request', async e=>{
+    es.addEventListener('control-request', e=>{
+      T.write(`\r\n[DEBUG] control-request 事件已触发!\r\n`);
       try{
         const d=JSON.parse(e.data);
-        const ok=confirm(`客户端请求控制 ${currentPort}，是否同意？`);
-        await fetch(B+q('/respond-control'),{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({port:currentPort,clientId:CID,requesterId:d.requesterId,approve:ok})});
-      }catch(_){}
+        T.write(`\r\n[DEBUG] 解析成功: requesterId=${d.requesterId}\r\n`);
+        // iframe 中 confirm() 会被浏览器安全策略阻止，且 embed 模式下工具栏整体隐藏，
+        // 因此统一使用自定义模态弹框（iframe/embed 场景均可正常显示）
+        T.write(`\r\n[${currentPort}] ⚠️ 客户端 ${d.requesterId.slice(0,8)} 请求控制\r\n`);
+        // 存储待处理的申请，供按钮回调使用
+        window.__pendingControlRequest={port:currentPort,requesterId:d.requesterId};
+        const el=document.getElementById('ctrlModal');
+        T.write(`\r\n[DEBUG] ctrlModal 元素: ${el?'存在':'不存在!'}\r\n`);
+        document.getElementById('ctrlModalMsg').textContent=`客户端 ${d.requesterId.slice(0,8)} 请求控制 ${currentPort}，是否同意？（10 秒未响应将自动同意）`;
+        el.style.display='flex';
+        T.write(`\r\n[DEBUG] ctrlModal display 已设为 flex\r\n`);
+      }catch(err){
+        T.write(`\r\n[ERROR] control-request 处理异常: ${err.message} ${err.stack||''}\r\n`);
+      }
     });
   es.addEventListener('control-taken',e=>{
     try{
       const d=JSON.parse(e.data);
+      // 控制权已变更（如超时自动同意），关闭可能仍显示的申请弹框
+      document.getElementById('ctrlModal').style.display='none';
+      delete window.__pendingControlRequest;
       if(d.newController===CID){
         T.write(`\r\n[${currentPort}] 🎮 你已成为控制端`+(d.reason?`（${d.reason}）`:'')+'\r\n');
       }else if(d.oldController===CID){
@@ -217,8 +273,31 @@ async function dc(){
   T.write(`\r\n[${currentPort}] 已断开\r\n`);
   if(window.parent!==window) parent.postMessage({type:'mcpSerialStatus',port:currentPort,connected:false},'*');
 }
+async function ensureSSERegistered(){
+  // 确保 SSE 已建立（clientId 已注册到服务端），用于 reqCtrl/forceCtrl 前置校验
+  console.log('[ensureSSERegistered] es=',es,'readyState=',es?.readyState,'currentPort=',currentPort,'CID=',CID,'sseConnecting=',sseConnecting);
+  if(!es||es.readyState!==EventSource.OPEN){
+    if(!currentPort)return false;
+    // 如果正在连接中，等待连接完成；否则重新建立连接
+    if(!sseConnecting){
+      connectSSE();
+    }
+    // 等待 SSE 建立（最多 3 秒）
+    for(let i=0;i<30;i++){
+      await new Promise(r=>setTimeout(r,100));
+      console.log('[ensureSSERegistered] wait',i,'readyState=',es?.readyState,'sseConnecting=',sseConnecting);
+      if(es&&es.readyState===EventSource.OPEN)return true;
+    }
+    return false;
+  }
+  return true;
+}
 async function reqCtrl(){
   try{
+    if(!await ensureSSERegistered()){
+      T.write('\r\n[控制] 失败: SSE 连接未建立，请先连接串口\r\n');
+      return;
+    }
     const r=await fetch(B+q('/request-control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:currentPort,clientId:CID})});
     const j=await r.json().catch(()=>({}));
     T.write('\r\n[控制] '+(j.message||('HTTP '+r.status))+'\r\n');
@@ -226,10 +305,25 @@ async function reqCtrl(){
 }
 async function forceCtrl(){
   try{
+    if(!await ensureSSERegistered()){
+      T.write('\r\n[控制] 失败: SSE 连接未建立，请先连接串口\r\n');
+      return;
+    }
     const r=await fetch(B+q('/force-control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:currentPort,clientId:CID})});
     const j=await r.json().catch(()=>({}));
     T.write('\r\n[控制] '+(j.message||('HTTP '+r.status))+'\r\n');
   }catch(e){T.write('\r\n[控制] 强制接管失败: '+e.message+'\r\n');}
+}
+async function respondCtrl(approve){
+  const req=window.__pendingControlRequest;
+  document.getElementById('ctrlModal').style.display='none';
+  if(!req)return;
+  try{
+    await fetch(B+q('/respond-control'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({port:req.port,clientId:CID,requesterId:req.requesterId,approve})});
+    T.write(`\r\n[${req.port}] 已${approve?'同意':'拒绝'} ${req.requesterId.slice(0,8)} 的控制申请\r\n`);
+  }catch(e){T.write('\r\n[控制] 响应失败: '+e.message+'\r\n');}
+  delete window.__pendingControlRequest;
 }
 function toggleTs(){
   showTs=!showTs;
@@ -282,17 +376,24 @@ async function init(){
     if(s.connected){
       conn=true;cb.textContent='断开';cb.style.background='#300';
       ps.value=s.port||'';bs.value=String(s.baudRate||115200);
-      st.textContent=s.port;connectSSE();connectWS();
+      st.textContent=s.port;
+      // 避免 auto=1 场景下 tc() 已调用 connectSSE() 导致重复连接
+      // 同时检查 sseConnecting，防止 tc() 的连接还在建立中
+      if((!es||es.readyState!==EventSource.OPEN)&&!sseConnecting){ connectSSE(); }
+      connectWS();
     }else{
         const q=new URLSearchParams(location.search).get('port');
         if(q){currentPort=q;ps.value=q;connectSSE();}
       T.write('等待连接...\r\n');
     }
   }catch(_){T.write('等待连接...\r\n');}
+  initDone=true;
 }
 init();
 if(QP.get('auto')==='1' && QP.get('port')){
   setTimeout(()=>{
+    // 等待 init() 完成，避免竞争
+    if(initDone) return;
     if(!conn){
       ps.value=QP.get('port');
       tc();

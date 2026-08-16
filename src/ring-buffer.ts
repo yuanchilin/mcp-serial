@@ -50,19 +50,26 @@ export class RingBuffer {
     }
   }
 
-  /** 获取从指定偏移量开始的所有数据 */
+  /** 获取从指定偏移量开始的所有数据（offset 和 newOffset 均为 UTF-8 字节） */
   getSince(offset: number): ReadResult {
     let text = "";
-    let currentOffset = 0;
+    let currentByteOffset = 0;
 
     for (let i = this.head; i < this.chunks.length; i++) {
       const chunk = this.chunks[i];
-      const chunkEnd = currentOffset + chunk.data.length;
+      const chunkEnd = currentByteOffset + chunk.bytes;
       if (chunkEnd > offset) {
-        const startInChunk = Math.max(0, offset - currentOffset);
-        text += chunk.data.slice(startInChunk);
+        // 计算 chunk 内需要跳过的字节数
+        const skipBytes = Math.max(0, offset - currentByteOffset);
+        if (skipBytes >= chunk.bytes) {
+          currentByteOffset = chunkEnd;
+          continue;
+        }
+        // 按字节截断后解码，Buffer.toString 会自动跳过开头不完整的 UTF-8 字节
+        const buf = Buffer.from(chunk.data, "utf-8");
+        text += buf.subarray(skipBytes).toString("utf-8");
       }
-      currentOffset = chunkEnd;
+      currentByteOffset = chunkEnd;
     }
 
     return { text, newOffset: this.totalBytes };

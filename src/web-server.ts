@@ -53,15 +53,16 @@ function sendError(res: http.ServerResponse, err: unknown, overrideCode?: number
 // 浏览器打开工具
 // ============================================================================
 
-let browserOpened = false;
+/** 已打开浏览器的 URL 集合（按 URL 去重，避免多实例共享标志导致误跳过） */
+const openedUrls = new Set<string>();
 
-/** 打开 URL：优先 VS Code Simple Browser，备用系统浏览器。仅打开一次。 */
+/** 打开 URL：优先 VS Code Simple Browser，备用系统浏览器。同一 URL 仅打开一次。 */
 export function openBrowser(url: string): boolean {
-  if (browserOpened) {
+  if (openedUrls.has(url)) {
     console.error(`[WebServer] 浏览器已打开，跳过: ${url}`);
     return false;
   }
-  browserOpened = true;
+  openedUrls.add(url);
 
   exec(`code --open-url "${url}"`, (err) => {
     if (!err) return; // VS Code 打开成功
@@ -515,6 +516,7 @@ async function handleRequestControl(
     if (prevTimeout) clearTimeout(prevTimeout);
 
     // 向当前控制端发送申请
+    console.error(`[handleRequestControl] port=${body.port} requester=${clientId.slice(0,8)} controller=${controller.slice(0,8)} sseClients=${monitor.sseClients.size}`);
     monitor.sendToClient(controller, "control-request", {
       requesterId: clientId,
       timestamp: Date.now(),

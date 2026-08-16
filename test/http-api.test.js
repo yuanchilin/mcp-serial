@@ -235,3 +235,54 @@ test("POST /send 已注册 http-agent 刷新活跃时间（防 TTL 误清）", a
     await closeServer(server);
   }
 });
+
+test("POST /request-control 向控制端发送 control-request SSE 事件", async () => {
+  const manager = new SerialManager(1024);
+  const monitor = manager.getOrCreate("COM3");
+
+  // 模拟控制端 "ctrl-1"（浏览器 SSE 连接），捕获 write 调用以验证事件发送
+  let sseWritten = null;
+  const ctrlRes = {
+    write(data) {
+      sseWritten = data;
+    },
+  };
+  monitor.sseClients.set("ctrl-1", {
+    res: ctrlRes,
+    connectedAt: Date.now(),
+    name: "Browser",
+    ip: "127.0.0.1",
+    lastSeen: Date.now(),
+  });
+  monitor.controllerClientId = "ctrl-1";
+
+  // 注册申请者 "req-1"（模拟另一个浏览器/agent 的 SSE 连接）
+  addSSEClient(manager, "COM3", "req-1");
+
+  const { server, base } = await startTestServer(manager);
+  try {
+    const res = await fetch(`${base}/request-control`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ port: "COM3", clientId: "req-1" }),
+    });
+    assert.equal(res.status, 200, "申请应返回 200");
+
+    // 验证 control-request SSE 事件已发送到控制端
+    assert.ok(sseWritten, "应发送 SSE 事件到控制端");
+    assert.ok(
+      sseWritten.includes("event: control-request"),
+      `SSE 事件应包含 event: control-request，实际: ${sseWritten}`
+    );
+    assert.ok(
+      sseWritten.includes("requesterId"),
+      `应包含 requesterId，实际: ${sseWritten}`
+    );
+    assert.ok(
+      sseWritten.includes("req-1"),
+      `应包含申请者 req-1，实际: ${sseWritten}`
+    );
+  } finally {
+    await closeServer(server);
+  }
+});

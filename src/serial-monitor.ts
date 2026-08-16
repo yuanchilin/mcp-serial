@@ -208,11 +208,19 @@ export class SerialMonitor {
       const sp = this.serialPort!;
       let polling = true;
       let pollTimer: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+
+      const cleanup = () => {
+        polling = false;
+        settled = true;
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        clearTimeout(timeoutId);
+      };
 
       // 主超时定时器
       const timeoutId = setTimeout(() => {
-        polling = false;
-        if (pollTimer) clearTimeout(pollTimer);
+        if (settled) return;
+        cleanup();
         const { text } = this.buffer.getSince(preSendOffset);
         resolve(text || "(超时 - 无响应)");
       }, timeout);
@@ -220,10 +228,7 @@ export class SerialMonitor {
       // 写入命令
       sp.write(command + lineEnding, (err) => {
         if (err) {
-          clearTimeout(timeoutId);
-          if (pollTimer) clearTimeout(pollTimer);
-          polling = false;
-          reject(err);
+          if (!settled) { cleanup(); reject(err); }
           return;
         }
 
@@ -247,11 +252,11 @@ export class SerialMonitor {
 
           if (idleMs >= stableThreshold) {
             // 已等待足够长时间，认为响应完成
-            clearTimeout(timeoutId);
-            polling = false;
-            if (pollTimer) clearTimeout(pollTimer);
-            const { text } = this.buffer.getSince(preSendOffset);
-            resolve(text || "(无响应)");
+            if (!settled) {
+              cleanup();
+              const { text } = this.buffer.getSince(preSendOffset);
+              resolve(text || "(无响应)");
+            }
             return;
           }
 
@@ -450,11 +455,20 @@ export class SerialMonitor {
   /** 向指定客户端发送事件 */
   sendToClient(clientId: string, eventName: string, data: unknown): void {
     const client = this.sseClients.get(clientId);
-    if (!client || !client.res) return;
+    if (!client) {
+      console.error(`[sendToClient] 客户端 ${clientId} 不存在（sseClients 数量: ${this.sseClients.size}）`);
+      return;
+    }
+    if (!client.res) {
+      console.error(`[sendToClient] 客户端 ${clientId} 无 SSE 响应（res:null, name:${client.name}, 事件:${eventName}）`);
+      return;
+    }
     try {
       const payload = JSON.stringify(data);
       client.res.write(`event: ${eventName}\ndata: ${payload}\n\n`);
-    } catch {
+      console.error(`[sendToClient] 已发送 ${eventName} -> ${clientId} (${client.name}): ${payload.slice(0,120)}`);
+    } catch (e) {
+      console.error(`[sendToClient] 发送失败，删除客户端 ${clientId}:`, e);
       this.sseClients.delete(clientId);
     }
   }

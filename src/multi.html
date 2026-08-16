@@ -68,7 +68,11 @@ const sessions=new Map(); // port -> {pane, floating, folded}
 
 function getCID(){
   let cid=sessionStorage.getItem('mcpSerialCid');
-  if(!cid){cid=crypto.randomUUID();sessionStorage.setItem('mcpSerialCid',cid);}
+  if(!cid){
+    // HTTP 非安全上下文 crypto.randomUUID 不可用，降级为随机字符串
+    cid=typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():'cid-'+Date.now()+'-'+Math.random().toString(36).slice(2,11);
+    sessionStorage.setItem('mcpSerialCid',cid);
+  }
   return cid;
 }
 const CID=getCID();
@@ -79,7 +83,13 @@ function q(p){ return TKN ? p+(p.includes('?')?'&':'?')+'token='+encodeURICompon
 
 window.addEventListener('message',e=>{
   const d=e.data;
-  if(!d||d.type!=='mcpSerialStatus')return;
+  if(!d)return;
+  // 处理置顶请求
+  if(d.type==='mcpSerialRaise'){
+    raisePane(d.port);
+    return;
+  }
+  if(d.type!=='mcpSerialStatus')return;
   const s=sessions.get(d.port);
   if(!s)return;
   const pane=s.pane;
@@ -112,7 +122,7 @@ function addPane(port){
   pane.dataset.connected='1';
   pane.innerHTML=`
     <div class="pane-core">
-      <div class="pane-head" onmousedown="startHeadDrag(event,'${escapeAttr(port)}')">
+      <div class="pane-head" onmousedown="raisePane('${escapeAttr(port)}');startHeadDrag(event,'${escapeAttr(port)}')">
         <span class="pane-title">${escapeHtml(port)}</span>
         <button class="conn-btn" title="连接/断开串口（保留面板）" onmousedown="event.stopPropagation()" onclick="toggleConnect('${escapeAttr(port)}')">断开</button>
         <button title="申请控制" onmousedown="event.stopPropagation()" onclick="iframeCall('${escapeAttr(port)}','reqCtrl')">申请</button>
@@ -143,6 +153,7 @@ function addPane(port){
   pane.addEventListener('mousedown', ()=>raisePane(port)); // 点击即置顶（重叠时选择谁在 top）
   const s={pane,floating:false,folded:false};
   sessions.set(port,s);
+  raisePane(port); // 新窗口默认置顶
   applyLayout(port,s);   // 恢复上次保存的布局（浮动/宽度/折叠），无保存则自动找空位
   renderMini();
   st.textContent=Array.from(sessions.keys()).join(', ');
@@ -222,10 +233,33 @@ function placePane(pane){
 }
 // ---- 置顶：重叠的浮动窗口点击谁谁在 top ----
 let zTop=1000;
+let topPanePort=null; // 当前置顶窗口的 port
 function raisePane(port){
   const s=sessions.get(port);
   if(!s)return;
   s.pane.style.zIndex=++zTop;
+  topPanePort=port;
+  updateTopIndicator();
+}
+function updateTopIndicator(){
+  // 移除所有窗口的置顶标记
+  for(const [p,s] of sessions){
+    const ind=s.pane.querySelector('.top-indicator');
+    if(ind)ind.remove();
+  }
+  // 给当前置顶窗口添加标记
+  if(topPanePort){
+    const s=sessions.get(topPanePort);
+    if(s){
+      const ind=document.createElement('span');
+      ind.className='top-indicator';
+      ind.textContent='🔝';
+      ind.title='当前置顶窗口';
+      ind.style.cssText='margin-left:4px;font-size:10px;';
+      const title=s.pane.querySelector('.pane-title');
+      if(title)title.appendChild(ind);
+    }
+  }
 }
 
 function toggleConnect(port){
