@@ -3,6 +3,10 @@ build/
 *.env
 .npmrc
 
+# Playwright 测试产物
+test-results/
+playwright-report/
+
 # 联调工具/产物，不建议入库
 dev.bat
 mailbox/

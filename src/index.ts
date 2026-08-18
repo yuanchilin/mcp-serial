@@ -18,7 +18,12 @@ const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN === "true"; // 默认 false（�
 const manager = new SerialManager(BUFFER_MAX_SIZE);
 const APP_VERSION = "2.5.0";
 
-const server = new Server({ name: "serial-terminal", version: APP_VERSION }, { capabilities: { tools: {} } });
+/**
+ * MCP Server 工厂：支持 stdio 与 SSE 两种传输
+ * （SSE 由 web-server 的 /mcp/sse 端点调用本工厂创建 Server 实例）
+ */
+export function createMCPServer(manager: SerialManager, version: string): Server {
+  const server = new Server({ name: "serial-terminal", version }, { capabilities: { tools: {} } });
 
 // 工具列表
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -247,6 +252,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 // ============================================================================
 // 辅助函数
 // ============================================================================
@@ -282,7 +290,7 @@ function formatBytes(bytes: number): string {
 // 主函数
 // ============================================================================
 async function main(): Promise<void> {
-  const webServer = startWebServer(WEB_PORT, manager, WEB_AUTO_OPEN, HOST);
+  const webServer = startWebServer(WEB_PORT, manager, WEB_AUTO_OPEN, HOST, createMCPServer, APP_VERSION);
 
   if (AUTO_CONNECT) {
     console.error(`[AutoConnect] → ${SERIAL_PORT_ENV} @ ${SERIAL_BAUDRATE_ENV} baud`);
@@ -295,9 +303,11 @@ async function main(): Promise<void> {
   }
 
   const transport = new StdioServerTransport();
+  const server = createMCPServer(manager, APP_VERSION);
   await server.connect(transport);
   console.error(`[MCP] Serial Terminal v${APP_VERSION}`);
   console.error(`[MCP] Web 终端: http://localhost:${WEB_PORT}`);
+  console.error(`[MCP] MCP over SSE: http://localhost:${WEB_PORT}/mcp/sse`);
   console.error(`[MCP] 自动连接: ${AUTO_CONNECT ? "启用" : "禁用"}`);
   console.error(`[MCP] Web 自动打开: ${WEB_AUTO_OPEN ? "启用" : "禁用"}`);
 
@@ -317,7 +327,13 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((error: unknown) => {
-  console.error("Server error:", error);
-  process.exit(1);
-});
+// 仅当直接运行本文件（node build/index.js）时执行 main；
+// import 本模块（如 SSE 工厂复用）不触发启动副作用
+import { pathToFileURL } from "node:url";
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  main().catch((error: unknown) => {
+    console.error("Server error:", error);
+    process.exit(1);
+  });
+}

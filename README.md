@@ -95,6 +95,15 @@ npm start
 
 > 除 `list_ports` 和 `open_web_monitor` 外，所有 `serial_*` 工具都支持可选 `port` 参数；不传时自动选择唯一活动串口或默认串口。
 
+### MCP over SSE 远程传输
+
+服务器同时支持两种 MCP 传输方式：
+
+- **stdio**（默认）：本地 MCP 客户端标准通道
+- **SSE**：`http://<host>:9721/mcp/sse`——远程 MCP 客户端（局域网/其他机器）通过 SSE 长连接接入，复用同一套 `serial_*` 工具（多串口能力一致）
+
+SSE 传输端点独立于 Web 令牌鉴权（`SERIAL_WEB_TOKEN`），由 MCP 客户端经传输层连接。
+
 ### 多串口使用示例
 
 ```text

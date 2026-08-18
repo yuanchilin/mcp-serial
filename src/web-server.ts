@@ -9,6 +9,8 @@ import type { SerialMonitor } from "./serial-monitor.js";
 import { getViewerHTML, getTerminalHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
 import type { SendRequestBody, ConnectRequestBody } from "./types.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import type { Server as MCPServer } from "@modelcontextprotocol/sdk/server/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,6 +18,12 @@ const VENDOR_DIR = join(__dirname, "vendor");
 
 /** POST 请求体大小上限 (64KB)，防止内存 DoS */
 const MAX_BODY_SIZE = 64 * 1024;
+
+/** MCP Server 工厂：由 index.ts 提供，SSE 端点用它创建 Server 实例 */
+export type MCPServerFactory = (manager: SerialManager, version: string) => MCPServer;
+
+/** MCP over SSE 会话表 (sessionId -> transport) */
+const sseTransports = new Map<string, SSEServerTransport>();
 
 // ============================================================================
 // 可选鉴权 (SERIAL_WEB_TOKEN)
@@ -101,7 +109,9 @@ export function startWebServer(
   port: number,
   manager: SerialManager,
   autoOpenBrowser: boolean = false,
-  host: string = "0.0.0.0"
+  host: string = "0.0.0.0",
+  mcpFactory?: MCPServerFactory,
+  mcpVersion?: string
 ): http.Server {
   const server = http.createServer((req, res) => {
     // CORS
@@ -112,6 +122,17 @@ export function startWebServer(
     if (req.method === "OPTIONS") {
       res.writeHead(200);
       res.end();
+      return;
+    }
+
+    // MCP over SSE 传输端点（独立于 Web 鉴权；由 MCP 客户端经传输层连接）
+    const rawPath = (req.url || "/").split("?")[0];
+    if (rawPath === "/mcp/sse") {
+      handleMCPSse(req, res, manager, mcpFactory, mcpVersion);
+      return;
+    }
+    if (req.method === "POST" && rawPath === "/mcp/message") {
+      handleMCPMessage(req, res);
       return;
     }
 
@@ -720,5 +741,57 @@ function handleSSE(
       if (cur.hb) clearInterval(cur.hb);
       monitor.removeClient(clientId, res);
     }
+  });
+}
+
+// ============================================================================
+// MCP over SSE — 远程传输端点 (从 feat/sse-remote-access 移植, 适配多串口)
+// ============================================================================
+
+/** GET /mcp/sse — 建立 SSE 连接，创建 MCP Server 实例 */
+function handleMCPSse(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  manager: SerialManager,
+  factory?: MCPServerFactory,
+  version?: string
+): void {
+  if (!factory) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("MCP over SSE not available");
+    return;
+  }
+
+  const transport = new SSEServerTransport("/mcp/message", res);
+  const server = factory(manager, version || "2.5.0");
+
+  transport.onclose = () => {
+    sseTransports.delete(transport.sessionId);
+    server.close().catch(() => {});
+  };
+
+  sseTransports.set(transport.sessionId, transport);
+  server.connect(transport).catch((err: Error) => {
+    console.error("[MCP-SSE] connect error:", err);
+  });
+}
+
+/** POST /mcp/message — 接收 MCP 客户端消息并路由到对应会话 */
+function handleMCPMessage(req: http.IncomingMessage, res: http.ServerResponse): void {
+  let sessionId: string | null = null;
+  try {
+    sessionId = new URL(req.url || "/", "http://localhost").searchParams.get("sessionId");
+  } catch {
+    sessionId = null;
+  }
+  if (!sessionId || !sseTransports.has(sessionId)) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Session not found");
+    return;
+  }
+
+  const transport = sseTransports.get(sessionId)!;
+  transport.handlePostMessage(req, res).catch((err: Error) => {
+    console.error("[MCP-SSE] handlePostMessage error:", err);
   });
 }
