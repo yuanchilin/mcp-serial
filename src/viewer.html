@@ -12,9 +12,21 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
 #bar select,#bar button{background:#000;color:#c0c0c0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
 #bar button:hover{background:#222}
 #bar .st{color:#888;margin-left:auto}
+#bar .ctrl-btn{display:none}
 #term{height:calc(100vh - 30px);overflow:hidden}
 .xterm{height:100%}
 .xterm-viewport{height:100%!important}
+#ctrl-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:99}
+#ctrl-dialog{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#222;border:1px solid #444;border-radius:4px;padding:20px 24px;z-index:100;color:#c0c0c0;font:13px Consolas,monospace;min-width:280px}
+#ctrl-dialog h3{margin:0 0 12px;color:#fff;font-size:14px}
+#ctrl-dialog p{margin:0 0 16px;line-height:1.5}
+#ctrl-dialog button{margin-right:8px;padding:4px 16px;background:#000;color:#c0c0c0;border:1px solid #333;cursor:pointer;font:inherit}
+#ctrl-dialog button:hover{background:#333}
+#ctrl-dialog .btn-approve{background:#150;border-color:#363}
+#ctrl-dialog .btn-approve:hover{background:#252}
+#ctrl-dialog .btn-reject{background:#300;border-color:#633}
+#ctrl-dialog .btn-reject:hover{background:#422}
+#toast{position:fixed;top:40px;right:20px;background:#222;color:#c0c0c0;padding:8px 16px;border:1px solid #444;border-radius:2px;font:12px Consolas,monospace;z-index:200;display:none;max-width:360px}
 </style>
 </head>
 <body>
@@ -26,36 +38,49 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
     <option value="230400">230400</option><option value="460800">460800</option><option value="921600">921600</option>
   </select>
   <button id="cb" onclick="tc()">连接</button>
+  <button class="ctrl-btn" id="reqBtn" onclick="requestControl()">申请控制</button>
+  <button class="ctrl-btn" id="forceBtn" onclick="forceControl()">强制接管</button>
   <button onclick="T.clear()">清除</button>
   <button onclick="copyText()">复制</button>
   <button onclick="saveText()">保存</button>
   <span class="st" id="st">未连接</span>
+  <span id="wsdb" style="color:#555;font-size:10px">WS:--</span>
 </div>
 <div id="term"></div>
 
+<div id="ctrl-overlay"></div>
+<div id="ctrl-dialog">
+  <h3>控制权申请</h3>
+  <p id="ctrl-msg"></p>
+  <button class="btn-approve" onclick="respondControl(true)">同意</button>
+  <button class="btn-reject" onclick="respondControl(false)">拒绝</button>
+</div>
+<div id="toast"></div>
+
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script>
-const CID=sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',crypto.randomUUID()),sessionStorage.getItem('xtermCid'));
+function genId(){return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{let r=Math.random()*16|0;return(c==='x'?r:r&0x3|0x8).toString(16)})}
+const CID=sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',genId()),sessionStorage.getItem('xtermCid'));
 const B=window.location.origin;
-let ws=null,conn=false,log='';
+let ws=null,conn=false,log='',isController=false,evtSrc=null;
+let pendingRequesterId=null;
 
 const T=new Terminal({fontSize:15,fontFamily:'Consolas,Monaco,monospace',
   theme:{background:'#000',foreground:'#c0c0c0',cursor:'#fff',selectionBackground:'#444',selectionForeground:'#fff'}});
 T.open(document.getElementById('term'));
 T.focus();
 
-// 全屏自适应 (实测字符尺寸)
+// 全屏自适应
 function fit(){
   let el=document.getElementById('term');
   let w=el.clientWidth, h=el.clientHeight;
   if(w<10||h<10)return;
-  // 创建测量元素
   let m=document.createElement('span');
   m.style.font=T.options.fontSize+'px '+T.options.fontFamily;
   m.style.position='absolute';m.style.visibility='hidden';
   m.textContent='W';document.body.appendChild(m);
   let cw=m.getBoundingClientRect().width;
-  let ch=T.options.fontSize*1.35; // 行高比例
+  let ch=T.options.fontSize*1.35;
   document.body.removeChild(m);
   T.resize(Math.floor(w/cw), Math.floor(h/ch));
 }
@@ -68,25 +93,128 @@ T.element.addEventListener('wheel',e=>{
 
 const ps=document.getElementById('ps'),bs=document.getElementById('bs');
 const cb=document.getElementById('cb'),st=document.getElementById('st');
+const reqBtn=document.getElementById('reqBtn'),forceBtn=document.getElementById('forceBtn');
 
-function connectWS(){
-  if(ws){try{ws.close()}catch(_){}}
-  ws=new WebSocket('ws://'+location.host+'/');
-  ws.binaryType='arraybuffer';
-  ws.onopen=()=>{};
-  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer){let b=new Uint8Array(e.data);T.write(b);log+=new TextDecoder().decode(b);if(log.length>1<<20)log=log.slice(-1<<19);}}
-  ws.onclose=()=>{ws=null};
-  ws.onerror=()=>{};
+// ---- Toast 通知 ----
+let toastTimer=null;
+function toast(msg){
+  let el=document.getElementById('toast');
+  el.textContent=msg;el.style.display='block';
+  if(toastTimer)clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{el.style.display='none'},3000);
 }
 
-T.onData(data=>{if(ws&&ws.readyState===WebSocket.OPEN)ws.send(data)});
+// ---- 控制权对话框 ----
+function showCtrlDialog(requesterId, requesterName){
+  pendingRequesterId=requesterId;
+  document.getElementById('ctrl-msg').textContent=
+    '客户端 '+(requesterName||requesterId.slice(0,8))+' 申请控制权，是否同意？';
+  document.getElementById('ctrl-overlay').style.display='block';
+  document.getElementById('ctrl-dialog').style.display='block';
+}
+function hideCtrlDialog(){
+  pendingRequesterId=null;
+  document.getElementById('ctrl-overlay').style.display='none';
+  document.getElementById('ctrl-dialog').style.display='none';
+}
+async function respondControl(approve){
+  if(!pendingRequesterId){hideCtrlDialog();return}
+  let r=await fetch(B+'/respond-control',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({clientId:CID,requesterId:pendingRequesterId,approve})});
+  hideCtrlDialog();
+  if(!r.ok)toast('响应失败');
+}
 
+// ---- 更新控制端 UI ----
+function updateCtrlUI(controllerId){
+  let wasController=isController;
+  isController=(controllerId===CID);
+  if(conn){
+    let label=ps.value||'串口';
+    st.textContent=label+(isController?' [控制端]':' [监视端]');
+    if(isController){st.style.color='#4a4';}else{st.style.color='#888';}
+    reqBtn.style.display=isController?'none':'inline-block';
+    forceBtn.style.display=isController?'none':'inline-block';
+    if(!wasController&&isController)toast('已获得控制权');
+    if(wasController&&!isController)toast('已失去控制权');
+  }
+}
+
+// ---- SSE 连接 ----
+function connectSSE(){
+  if(evtSrc){evtSrc.close();evtSrc=null}
+  let name=navigator.userAgent.slice(0,30).replace(/\s+/g,' ');
+  evtSrc=new EventSource(B+'/events?clientId='+encodeURIComponent(CID)+'&name='+encodeURIComponent(name));
+  evtSrc.addEventListener('status',e=>{
+    try{
+      let s=JSON.parse(e.data);
+      if(s.connected){
+        if(!conn){
+          conn=true;cb.textContent='断开';cb.style.background='#300';
+          ps.value=s.port||'';bs.value=String(s.baudRate||115200);
+          connectWS();
+        }
+        updateCtrlUI(s.controllerClientId);
+      }else{
+        conn=false;cb.textContent='连接';cb.style.background='';
+        st.textContent='未连接';st.style.color='#888';
+        reqBtn.style.display='none';forceBtn.style.display='none';
+        st.textContent='未连接';
+      }
+    }catch(_){}
+  });
+  evtSrc.addEventListener('control-request',e=>{
+    try{
+      let d=JSON.parse(e.data);
+      if(isController)showCtrlDialog(d.requesterId,'');
+    }catch(_){}
+  });
+  evtSrc.addEventListener('control-response',e=>{
+    try{
+      let d=JSON.parse(e.data);
+      if(d.approved)toast(d.autoApproved?'控制权已自动获得（超时）':'控制权申请已通过');
+      else toast('控制权申请被拒绝');
+    }catch(_){}
+  });
+  evtSrc.addEventListener('control-taken',e=>{
+    try{
+      let d=JSON.parse(e.data);
+      updateCtrlUI(d.newController);
+    }catch(_){}
+  });
+  evtSrc.onerror=()=>{setTimeout(connectSSE,2000)};
+}
+
+// ---- WebSocket ----
+function connectWS(){
+  const oldWs=ws;
+  if(oldWs){try{oldWs.close()}catch(_){}}
+  const newWs=new WebSocket('ws://'+location.host+'/?clientId='+encodeURIComponent(CID));
+  ws=newWs;
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{document.getElementById('wsdb').textContent='WS:已连接 CID:'+CID.slice(0,8)};
+  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer){let b=new Uint8Array(e.data);T.write(b);log+=new TextDecoder().decode(b);if(log.length>1<<20)log=log.slice(-1<<19);}}
+  ws.onclose=()=>{if(ws===newWs){ws=null;}document.getElementById('wsdb').textContent='WS:断开'};
+  ws.onerror=()=>{document.getElementById('wsdb').textContent='WS:错误'};
+}
+
+T.onData(data=>{if(ws&&ws.readyState===WebSocket.OPEN){ws.send(data);document.getElementById('wsdb').style.color='#0a0';setTimeout(()=>document.getElementById('wsdb').style.color='#555',300)}});
+
+// ---- 连接/断开 ----
 async function tc(){
   if(conn){await dc();return}
   let p=ps.value;if(!p)return;
   let r=await fetch(B+'/connect',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({port:p,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
-  if(!r.ok){st.textContent='连接失败';return}
+  if(!r.ok){
+    let data=await r.json().catch(()=>({error:'连接失败'}));
+    if(data.error&&data.error.includes('没有控制权限')){
+      toast('没有控制权限，请点击"申请控制"或"强制接管"');
+    }else{
+      st.textContent='连接失败';
+    }
+    return;
+  }
   conn=true;cb.textContent='断开';cb.style.background='#300';
   st.textContent=p;connectWS();
 }
@@ -94,6 +222,7 @@ async function dc(){
   await fetch(B+'/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
   if(ws)ws.close();ws=null;
   conn=false;cb.textContent='连接';cb.style.background='';st.textContent='未连接';
+  st.style.color='#888';reqBtn.style.display='none';forceBtn.style.display='none';
 }
 async function rp(){
   try{
@@ -108,13 +237,33 @@ async function rp(){
     T.write('Ports error: '+e.message+'\r\n');
   }
 }
+
+// ---- 控制权申请/接管 ----
+async function requestControl(){
+  let r=await fetch(B+'/request-control',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({clientId:CID})});
+  let d=await r.json();
+  toast(d.message||'已发送申请');
+}
+async function forceControl(){
+  let r=await fetch(B+'/force-control',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({clientId:CID})});
+  let d=await r.json();
+  if(d.ok)toast('已强制接管控制权');
+  else toast(d.error||'强制接管失败');
+}
+
+// ---- 初始化 ----
 async function init(){
   await rp();
-  try{let r=await fetch(B+'/status');let s=await r.json();
+  connectSSE();
+  try{
+    let r=await fetch(B+'/status');let s=await r.json();
     if(s.connected){
       conn=true;cb.textContent='断开';cb.style.background='#300';
       ps.value=s.port||'';bs.value=String(s.baudRate||115200);
-      st.textContent=s.port;connectWS();
+      updateCtrlUI(s.controllerClientId);
+      connectWS();
     }else{
       T.write('等待连接...\r\n');
     }

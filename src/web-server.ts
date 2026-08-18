@@ -1,10 +1,23 @@
 import * as http from "http";
+import * as os from "os";
 import { exec } from "child_process";
 import { WebSocketServer } from "ws";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { SerialMonitor } from "./serial-monitor.js";
 import { getViewerHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
 import type { SendRequestBody, ConnectRequestBody } from "./types.js";
+
+// ============================================================================
+// MCP Server 工厂类型
+// ============================================================================
+type MCPServerFactory = (monitor: SerialMonitor, version: string) => Server;
+
+// ============================================================================
+// SSE MCP 传输会话管理
+// ============================================================================
+const sseTransports = new Map<string, SSEServerTransport>();
 
 // ============================================================================
 // 浏览器打开工具
@@ -43,6 +56,26 @@ export function openBrowser(url: string): boolean {
 }
 
 // ============================================================================
+// 局域网 IP 检测
+// ============================================================================
+
+/** 获取本机局域网 IPv4 地址列表 */
+export function getLanIPs(): string[] {
+  const Result: string[] = [];
+  const Interfaces = os.networkInterfaces();
+  for (const Name of Object.keys(Interfaces)) {
+    const Ifaces = Interfaces[Name];
+    if (!Ifaces) continue;
+    for (const Iface of Ifaces) {
+      if (Iface.family === "IPv4" && !Iface.internal) {
+        Result.push(Iface.address);
+      }
+    }
+  }
+  return Result;
+}
+
+// ============================================================================
 // 控制权申请管理
 // ============================================================================
 
@@ -56,7 +89,9 @@ const pendingRequests = new Map<string, ReturnType<typeof setTimeout>>();
 export function startWebServer(
   port: number,
   monitor: SerialMonitor,
-  autoOpenBrowser: boolean = false
+  autoOpenBrowser: boolean = false,
+  mcpServerFactory?: MCPServerFactory,
+  appVersion?: string
 ): http.Server {
   const server = http.createServer((req, res) => {
     // CORS
@@ -115,6 +150,22 @@ export function startWebServer(
       return;
     }
 
+    // ====================================================================
+    // MCP over SSE — 远程 MCP 客户端连接
+    // ====================================================================
+
+    // GET /mcp/sse — 建立 SSE 连接，启动 MCP Server 实例
+    if (url.pathname === "/mcp/sse") {
+      handleMCPSse(req, res, monitor, mcpServerFactory, appVersion);
+      return;
+    }
+
+    // POST /mcp/message — 接收 MCP 客户端消息
+    if (req.method === "POST" && url.pathname === "/mcp/message") {
+      handleMCPMessage(req, res, url);
+      return;
+    }
+
     // GET /ports — 列出可用串口
     if (url.pathname === "/ports") {
       handleGetPorts(req, res);
@@ -130,7 +181,7 @@ export function startWebServer(
 
     // GET /
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate" });
       res.end(getViewerHTML());
       return;
     }
@@ -144,11 +195,20 @@ export function startWebServer(
   const wss = new WebSocketServer({ server });
   wss.on("connection", (ws, req) => {
     const name = (req.headers["user-agent"] || "ws").slice(0, 20);
-    monitor.addWSClient(ws, name);
+    const wsUrl = new URL(req.url || "/", "http://localhost");
+    const clientId = wsUrl.searchParams.get("clientId") || undefined;
+    monitor.addWSClient(ws, name, clientId);
   });
 
-  server.listen(port, () => {
+  server.listen(port, "0.0.0.0", () => {
+    const LanIPs = getLanIPs();
     console.error(`[WebServer] 串口实时终端: http://localhost:${port}`);
+    if (LanIPs.length > 0) {
+      for (const Ip of LanIPs) {
+        console.error(`[WebServer] 局域网访问: http://${Ip}:${port}`);
+      }
+      console.error(`[WebServer] 提示: 如果局域网其他电脑无法访问，请检查 Windows 防火墙是否放行端口 ${port}`);
+    }
     if (autoOpenBrowser) {
       openBrowser(`http://localhost:${port}`);
     }
@@ -502,5 +562,56 @@ function handleSSE(
 
   req.on("close", () => {
     monitor.removeClient(clientId);
+  });
+}
+
+// ============================================================================
+// MCP over SSE — 处理函数
+// ============================================================================
+
+/** GET /mcp/sse — 建立 SSE 连接，创建 MCP Server 实例 */
+function handleMCPSse(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  monitor: SerialMonitor,
+  factory?: MCPServerFactory,
+  version?: string
+): void {
+  if (!factory) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("MCP over SSE not available");
+    return;
+  }
+
+  const transport = new SSEServerTransport("/mcp/message", res);
+  const server = factory(monitor, version || "2.3.0");
+
+  transport.onclose = () => {
+    sseTransports.delete(transport.sessionId);
+    server.close().catch(() => {});
+  };
+
+  sseTransports.set(transport.sessionId, transport);
+  server.connect(transport).catch((err: Error) => {
+    console.error("[MCP-SSE] connect error:", err);
+  });
+}
+
+/** POST /mcp/message — 接收 MCP 客户端消息并路由到对应会话 */
+function handleMCPMessage(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL
+): void {
+  const sessionId = url.searchParams.get("sessionId");
+  if (!sessionId || !sseTransports.has(sessionId)) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Session not found");
+    return;
+  }
+
+  const transport = sseTransports.get(sessionId)!;
+  transport.handlePostMessage(req, res).catch((err: Error) => {
+    console.error("[MCP-SSE] handlePostMessage error:", err);
   });
 }

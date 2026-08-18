@@ -22,6 +22,7 @@ interface ClientInfo {
 interface WSClient {
   ws: WebSocket;
   name: string;
+  clientId?: string;
 }
 
 // ============================================================================
@@ -249,10 +250,14 @@ export class SerialMonitor {
 
   // ---- WebSocket 客户端管理 ----
 
-  addWSClient(ws: WebSocket, name: string): void {
-    this.wsClients.add({ ws, name });
+  addWSClient(ws: WebSocket, name: string, clientId?: string): void {
+    this.wsClients.add({ ws, name, clientId });
     ws.on("message", (data: Buffer) => {
       if (this.serialPort && this.serialPort.isOpen) {
+        // 有 clientId 的 WS 连接需要校验控制权，非控制端忽略
+        if (clientId && this.controllerClientId && clientId !== this.controllerClientId) {
+          return;
+        }
         this.serialPort.write(data);
       }
     });
