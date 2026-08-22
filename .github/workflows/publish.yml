@@ -1,78 +1,30 @@
-# ============================================================================
-# CD — npm 发布（手动触发，带 tag 与 dry-run 选项）
-# 触发：workflow_dispatch（GitHub UI 点 Run workflow）
-# 发布策略：
-#   - tag=latest → 稳定版（如 master 分支构建）
-#   - tag=next   → 实验版（如多串口/未验证分支）
-# 前置：仓库 Settings → Secrets → NPM_TOKEN（npm 账号 granular token，Bypass 2FA）
-# ============================================================================
 name: Publish npm
-
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "npm dist-tag（latest=稳定版 / next=实验版）"
+        description: npm dist-tag
         required: true
-        default: "next"
-        type: choice
-        options:
-          - latest
-          - next
-      dry_run:
-        description: "dry-run：只验证构建/测试/版本号，不真正发布"
-        required: false
-        default: false
-        type: boolean
-
 jobs:
   publish:
-    name: Verify + Publish
     runs-on: ubuntu-latest
-    env:
-      NODE_VERSION: "22"
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}   # 以本机 nodenv 22 为基准
+          node-version: 22
           registry-url: https://registry.npmjs.org
-
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-      - name: Read package version
-        id: ver
-        run: echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
-
-      - name: Check version not already published
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
+      - name: Check version not published
         run: |
-          V="${{ steps.ver.outputs.version }}"
+          V=$(node -p "require('./package.json').version")
           if npm view @yuanchilin/mcp-serial@${V} version --registry https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "❌ 版本 ${V} 已发布过，请先 npm version 升版"
+            echo "版本 ${V} 已发布过，中止"
             exit 1
           fi
-          echo "✅ 版本 ${V} 尚未发布，可以发布"
-
-      - name: Publish (dry-run)
-        if: inputs.dry_run == true
-        run: npx npm pack --dry-run
+          echo "版本 ${V} 可发布"
+      - run: npm publish --registry https://registry.npmjs.org --tag ${{ inputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish to npm (${{ inputs.tag }})
-        if: inputs.dry_run == false
-        run: npm publish --registry https://registry.npmjs.org --tag ${{ inputs.tag }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Output result
-        run: |
-          echo "已发布 @yuanchilin/mcp-serial@${{ steps.ver.outputs.version }} (tag: ${{ inputs.tag }})"
