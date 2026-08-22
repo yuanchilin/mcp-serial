@@ -62,6 +62,15 @@ body{background:#000;height:100vh;display:flex;flex-direction:column}
 function genId(){return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{let r=Math.random()*16|0;return(c==='x'?r:r&0x3|0x8).toString(16)})}
 const CID=sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',genId()),sessionStorage.getItem('xtermCid'));
 const B=window.location.origin;
+// 可选访问令牌/会话：访问 http://host:9721/?token=XXX 或登录后 ?session=XXX，自动透传给所有请求
+const TOKEN=new URLSearchParams(location.search).get('token')||'';
+const SESSION=new URLSearchParams(location.search).get('session')||'';
+function tk(u){
+  let s=u;
+  if(TOKEN){s+=(s.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN);}
+  if(SESSION){s+=(s.includes('?')?'&':'?')+'session='+encodeURIComponent(SESSION);}
+  return s;
+}
 let ws=null,conn=false,log='',isController=false,evtSrc=null;
 let pendingRequesterId=null;
 
@@ -119,7 +128,7 @@ function hideCtrlDialog(){
 }
 async function respondControl(approve){
   if(!pendingRequesterId){hideCtrlDialog();return}
-  let r=await fetch(B+'/respond-control',{method:'POST',headers:{'Content-Type':'application/json'},
+  let r=await fetch(tk(B+'/respond-control'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({clientId:CID,requesterId:pendingRequesterId,approve})});
   hideCtrlDialog();
   if(!r.ok)toast('响应失败');
@@ -144,7 +153,7 @@ function updateCtrlUI(controllerId){
 function connectSSE(){
   if(evtSrc){evtSrc.close();evtSrc=null}
   let name=navigator.userAgent.slice(0,30).replace(/\s+/g,' ');
-  evtSrc=new EventSource(B+'/events?clientId='+encodeURIComponent(CID)+'&name='+encodeURIComponent(name));
+  evtSrc=new EventSource(tk(B+'/events?clientId='+encodeURIComponent(CID)+'&name='+encodeURIComponent(name)));
   evtSrc.addEventListener('status',e=>{
     try{
       let s=JSON.parse(e.data);
@@ -189,7 +198,7 @@ function connectSSE(){
 function connectWS(){
   const oldWs=ws;
   if(oldWs){try{oldWs.close()}catch(_){}}
-  const newWs=new WebSocket('ws://'+location.host+'/?clientId='+encodeURIComponent(CID));
+  const newWs=new WebSocket(tk('ws://'+location.host+'/?clientId='+encodeURIComponent(CID)));
   ws=newWs;
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{document.getElementById('wsdb').textContent='WS:已连接 CID:'+CID.slice(0,8)};
@@ -204,7 +213,7 @@ T.onData(data=>{if(ws&&ws.readyState===WebSocket.OPEN){ws.send(data);document.ge
 async function tc(){
   if(conn){await dc();return}
   let p=ps.value;if(!p)return;
-  let r=await fetch(B+'/connect',{method:'POST',headers:{'Content-Type':'application/json'},
+  let r=await fetch(tk(B+'/connect'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({port:p,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
   if(!r.ok){
     let data=await r.json().catch(()=>({error:'连接失败'}));
@@ -219,14 +228,14 @@ async function tc(){
   st.textContent=p;connectWS();
 }
 async function dc(){
-  await fetch(B+'/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
+  await fetch(tk(B+'/disconnect'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
   if(ws)ws.close();ws=null;
   conn=false;cb.textContent='连接';cb.style.background='';st.textContent='未连接';
   st.style.color='#888';reqBtn.style.display='none';forceBtn.style.display='none';
 }
 async function rp(){
   try{
-    let r=await fetch(B+'/ports');
+    let r=await fetch(tk(B+'/ports'));
     if(!r.ok)throw new Error(r.status);
     let a=await r.json();
     let cur=ps.value;ps.innerHTML='<option value="">-- 端口 --</option>';
@@ -240,13 +249,13 @@ async function rp(){
 
 // ---- 控制权申请/接管 ----
 async function requestControl(){
-  let r=await fetch(B+'/request-control',{method:'POST',headers:{'Content-Type':'application/json'},
+  let r=await fetch(tk(B+'/request-control'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({clientId:CID})});
   let d=await r.json();
   toast(d.message||'已发送申请');
 }
 async function forceControl(){
-  let r=await fetch(B+'/force-control',{method:'POST',headers:{'Content-Type':'application/json'},
+  let r=await fetch(tk(B+'/force-control'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({clientId:CID})});
   let d=await r.json();
   if(d.ok)toast('已强制接管控制权');
@@ -258,7 +267,7 @@ async function init(){
   await rp();
   connectSSE();
   try{
-    let r=await fetch(B+'/status');let s=await r.json();
+    let r=await fetch(tk(B+'/status'));let s=await r.json();
     if(s.connected){
       conn=true;cb.textContent='断开';cb.style.background='#300';
       ps.value=s.port||'';bs.value=String(s.baudRate||115200);

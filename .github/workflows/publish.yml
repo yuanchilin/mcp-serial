@@ -1,0 +1,30 @@
+name: Publish npm
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: npm dist-tag
+        required: true
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
+      - name: Check version not published
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view @yuanchilin/mcp-serial@${V} version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "版本 ${V} 已发布过，中止"
+            exit 1
+          fi
+          echo "版本 ${V} 可发布"
+      - run: npm publish --registry https://registry.npmjs.org --tag ${{ inputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

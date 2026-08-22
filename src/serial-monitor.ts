@@ -9,8 +9,11 @@ import type { WebSocket } from "ws";
 // ============================================================================
 
 interface ClientInfo {
-  res: ServerResponse;
+  /** SSE 响应对象；无连接注册（如 /send 自动接管）时为 null */
+  res: ServerResponse | null;
   connectedAt: number;
+  /** 最后活跃时间（用于非连接客户端的 TTL 清理） */
+  lastSeen: number;
   name: string;
   ip: string;
 }
@@ -277,16 +280,79 @@ export class SerialMonitor {
 
   // ---- SSE 客户端管理 ----
 
+  /**
+   * 注册一个 SSE 客户端。同 clientId 重连时顶掉旧连接（end 旧 res），
+   * 避免旧 res 泄漏与竞态误删新连接。
+   */
   addClient(clientId: string, res: ServerResponse, name: string, ip: string): void {
-    this.sseClients.set(clientId, { res, connectedAt: Date.now(), name, ip });
+    const existing = this.sseClients.get(clientId);
+    if (existing && existing.res && existing.res !== res) {
+      try { existing.res.end(); } catch { /* 旧连接已失效 */ }
+    }
+    this.sseClients.set(clientId, { res, connectedAt: Date.now(), lastSeen: Date.now(), name, ip });
     // 首个客户端自动成为控制端
     if (!this.controllerClientId) {
       this.controllerClientId = clientId;
     }
-    console.error(`[SSE] 客户端 ${name}(${ip}) 已连接，当前 ${this.sseClients.size} 个客户端`);
+    // 仅新客户端（非同 clientId 重连）打印，避免浏览器刷新刷屏
+    if (!existing) {
+      console.error(`[SSE] 客户端 ${name}(${ip}) 已连接，当前 ${this.sseClients.size} 个客户端`);
+    }
   }
 
-  removeClient(clientId: string): void {
+  /**
+   * 无连接注册（如 HTTP /send 自动接管控制端）。res 为 null，不推送数据。
+   * 已存在则仅刷新 lastSeen。
+   */
+  registerClient(clientId: string, name = "http-agent", ip = "127.0.0.1"): void {
+    const existing = this.sseClients.get(clientId);
+    if (existing) {
+      existing.lastSeen = Date.now();
+      return;
+    }
+    this.sseClients.set(clientId, { res: null, connectedAt: Date.now(), lastSeen: Date.now(), name, ip });
+  }
+
+  /** 是否已注册（含无连接注册） */
+  isRegistered(clientId: string): boolean {
+    return this.sseClients.has(clientId);
+  }
+
+  /** 刷新客户端活跃时间（用于 TTL 清理） */
+  touchClient(clientId: string): void {
+    const c = this.sseClients.get(clientId);
+    if (c) c.lastSeen = Date.now();
+  }
+
+  /**
+   * 清理过期的无连接（null res）客户端，避免 /send 幽灵控制端无限堆积。
+   * 默认 30 分钟，可用 SERIAL_AGENT_TTL_MS 覆盖。
+   */
+  pruneStaleClients(ttlMs: number = 30 * 60 * 1000): void {
+    const now = Date.now();
+    let controllerRemoved = false;
+    for (const [id, c] of this.sseClients) {
+      if (c.res === null && now - c.lastSeen > ttlMs) {
+        this.sseClients.delete(id);
+        if (this.controllerClientId === id) controllerRemoved = true;
+      }
+    }
+    if (controllerRemoved) {
+      this.controllerClientId = this.getOldestClient();
+      this.broadcastStatus();
+    }
+  }
+
+  /**
+   * 移除客户端。res 参数用于身份校验：当存在同 clientId 的更新连接时，
+   * 旧连接断开不应误删新连接。
+   */
+  removeClient(clientId: string, res?: ServerResponse): void {
+    const existing = this.sseClients.get(clientId);
+    if (existing && res && existing.res !== res) {
+      // 这是旧连接的断开事件，新连接已接管该 clientId，不删除
+      return;
+    }
     this.sseClients.delete(clientId);
     console.error(`[SSE] 客户端 ${clientId.slice(0, 8)} 已断开，当前 ${this.sseClients.size} 个客户端`);
 
@@ -307,11 +373,13 @@ export class SerialMonitor {
     }
   }
 
-  /** 设置控制端 */
+  /** 设置控制端（返回 false 表示 clientId 未注册，不设置） */
   setController(clientId: string): boolean {
     if (!this.sseClients.has(clientId)) return false;
     const oldController = this.controllerClientId;
     this.controllerClientId = clientId;
+    const c = this.sseClients.get(clientId);
+    if (c) c.lastSeen = Date.now();
     this.broadcastControlEvent("control-taken", {
       newController: clientId,
       oldController: oldController,
@@ -336,7 +404,7 @@ export class SerialMonitor {
   /** 向指定客户端发送事件 */
   sendToClient(clientId: string, eventName: string, data: unknown): void {
     const client = this.sseClients.get(clientId);
-    if (!client) return;
+    if (!client || !client.res) return;
     try {
       const payload = JSON.stringify(data);
       client.res.write(`event: ${eventName}\ndata: ${payload}\n\n`);
@@ -351,6 +419,7 @@ export class SerialMonitor {
     const payload = JSON.stringify(data);
     const eventData = `event: ${eventName}\ndata: ${payload}\n\n`;
     for (const [, client] of this.sseClients) {
+      if (!client.res) continue;
       try {
         client.res.write(eventData);
       } catch {
@@ -365,6 +434,7 @@ export class SerialMonitor {
     const payload = JSON.stringify(this.getStatus());
     const eventData = `event: status\ndata: ${payload}\n\n`;
     for (const [, client] of this.sseClients) {
+      if (!client.res) continue;
       try {
         client.res.write(eventData);
       } catch {
@@ -383,11 +453,32 @@ export class SerialMonitor {
     })}\n\n`;
 
     for (const [, client] of this.sseClients) {
+      if (!client.res) continue;
       try {
         client.res.write(eventData);
       } catch {
         // dead client
       }
+    }
+  }
+
+  /** 释放资源：关闭所有 SSE/WS 长连接并断开串口（进程退出时调用） */
+  dispose(): void {
+    for (const [, client] of this.sseClients) {
+      try { client.res?.end(); } catch { /* ignore */ }
+    }
+    this.sseClients.clear();
+    for (const c of this.wsClients) {
+      try { c.ws.close(); } catch { /* ignore */ }
+    }
+    this.wsClients.clear();
+    this.controllerClientId = null;
+    if (this.isActive()) {
+      try {
+        this.serialPort?.close();
+      } catch { /* ignore */ }
+      this.serialPort = null;
+      this.startedAt = null;
     }
   }
 }

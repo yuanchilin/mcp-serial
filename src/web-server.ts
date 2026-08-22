@@ -1,6 +1,7 @@
 import * as http from "http";
 import * as os from "os";
 import { exec } from "child_process";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -13,6 +14,189 @@ import type { SendRequestBody, ConnectRequestBody } from "./types.js";
 // MCP Server 工厂类型
 // ============================================================================
 type MCPServerFactory = (monitor: SerialMonitor, version: string) => Server;
+
+// ============================================================================
+// 安全 / 健壮性 公共工具
+// ============================================================================
+
+/** 请求体上限：64KB，超限返回 413，防止内存耗尽 DoS */
+const MAX_BODY_BYTES = 64 * 1024;
+
+/** 带 HTTP 状态码的错误，便于统一错误处理 */
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
+/** 读取已配置的可选访问令牌（默认空 = 关闭鉴权，向后兼容） */
+function getConfiguredToken(): string {
+  return process.env.SERIAL_WEB_TOKEN || "";
+}
+
+/**
+ * 校验请求是否通过令牌鉴权。
+ * - 未配置 SERIAL_WEB_TOKEN：始终放行（向后兼容）。
+ * - 已配置：需携带 `Authorization: Bearer <token>` 或 `?token=<token>`。
+ */
+function tokenValid(req: http.IncomingMessage, url: URL): boolean {
+  const t = getConfiguredToken();
+  if (!t) return true;
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+    if (auth.slice(7) === t) return true;
+  }
+  const q = url.searchParams.get("token");
+  if (q && q === t) return true;
+  return false;
+}
+
+// ============================================================================
+// 远程访问密码认证（SERIAL_WEB_PASSWORD）
+//  - 本机(回环)访问免密；远程访问需密码（登录后发会话令牌，sessionStorage 关标签失效）
+//  - 未设密码（env 空且未手动输入）→ 免密模式，一切开放（现状行为）
+// ============================================================================
+
+/** 本次运行的访问密码（env 或启动时手动输入，index.ts 传入）；空 = 免密模式 */
+let WEB_PASSWORD = process.env.SERIAL_WEB_PASSWORD || "";
+
+/** 登录会话: token -> 过期时间戳 */
+const sessions = new Map<string, number>();
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时上限（sessionStorage 关标签即失效为主）
+
+/** 设置访问密码（启动时手动输入后调用） */
+export function setWebPassword(p: string): void {
+  WEB_PASSWORD = p || "";
+}
+
+/** 是否为本机（回环）来源 */
+function isLocal(req: http.IncomingMessage): boolean {
+  const addr = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  return addr === "127.0.0.1" || addr === "::1" || addr === "localhost";
+}
+
+/** 校验登录会话令牌是否有效 */
+function sessionValid(token: string | null): boolean {
+  if (!token) return false;
+  const exp = sessions.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) { sessions.delete(token); return false; }
+  return true;
+}
+
+/** 认证总入口：本机免密 / token 放行 / 密码模式远程需会话 */
+function authPass(req: http.IncomingMessage, url: URL): boolean {
+  if (isLocal(req)) return true; // 本机免密
+  // 配置了 SERIAL_WEB_TOKEN 才校验（未配置不拦截）
+  const t = getConfiguredToken();
+  if (t) {
+    const auth = req.headers["authorization"];
+    if (typeof auth === "string" && auth.startsWith("Bearer ") && auth.slice(7) === t) return true;
+    if (url.searchParams.get("token") === t) return true;
+  }
+  if (!WEB_PASSWORD) return true; // 免密模式（无密码开放）
+  return sessionValid(url.searchParams.get("session")); // 密码模式远程需会话
+}
+
+/** 生成一次性登录会话令牌 */
+function createSession(): string {
+  const t = randomUUID();
+  sessions.set(t, Date.now() + SESSION_TTL_MS);
+  return t;
+}
+
+/** 远程无会话时的登录页（深色极简，与终端风格一致） */
+function loginPageHtml(): string {
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>串口终端 · 授权访问</title>
+<style>
+body{background:#000;color:#ccc;font:14px Consolas,monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#161616;border:1px solid #333;padding:36px 44px;border-radius:8px;width:320px}
+h1{font-size:15px;color:#4caf50;margin:0 0 20px}
+label{display:block;color:#888;font-size:12px;margin-bottom:6px}
+input{width:100%;box-sizing:border-box;background:#000;color:#ccc;border:1px solid #444;padding:8px 10px;font:inherit;margin-bottom:16px;border-radius:4px}
+button{width:100%;background:#2d5a2d;color:#fff;border:none;padding:9px;font:inherit;border-radius:4px;cursor:pointer}
+button:hover{background:#3a7a3a}
+.err{color:#f66;font-size:12px;margin-top:10px;display:none}
+</style></head>
+<body><div class="card">
+<h1>🔒 串口终端 · 授权访问</h1>
+<label>访问密码</label>
+<input type="password" id="pwd" placeholder="请输入密码" autofocus>
+<button id="btn">登录</button>
+<div class="err" id="err">密码错误，请重试</div>
+</div>
+<script>
+const pwd=document.getElementById('pwd'),btn=document.getElementById('btn'),err=document.getElementById('err');
+async function login(){
+  if(!pwd.value)return;
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pwd:pwd.value})});
+  if(r.ok){const d=await r.json();sessionStorage.setItem('mcpSerialSession',d.session);
+    location.href='/?session='+encodeURIComponent(d.session);}
+  else{err.style.display='block';pwd.value='';pwd.focus();}
+}
+btn.onclick=login;pwd.addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+</script></body></html>`;
+}
+
+/** POST /api/login — 比对密码，成功发会话令牌 */
+function handleLogin(req: http.IncomingMessage, res: http.ServerResponse): void {
+  parseBody<{ pwd?: string }>(req)
+    .then(({ pwd }) => {
+      if (pwd && pwd === WEB_PASSWORD) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, session: createSession() }));
+      } else {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "密码错误" }));
+      }
+    })
+    .catch((e) => sendError(res, e));
+}
+
+/** 读取请求体原始文本，超过 MAX_BODY_BYTES 抛 HttpError(413) */
+function readBodyRaw(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    let body = "";
+    let aborted = false;
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        aborted = true;
+        reject(new HttpError(413, "请求体过大（上限 64KB）"));
+        // 注意：不要在发送 413 前 destroy 套接字，否则响应无法送达
+        return;
+      }
+      body += chunk.toString();
+    });
+    req.on("end", () => { if (!aborted) resolve(body); });
+    req.on("error", (e) => { if (!aborted) reject(e); });
+  });
+}
+
+/** 解析 JSON 请求体（复用读取上限）；解析失败抛 HttpError(400) */
+async function parseBody<T>(req: http.IncomingMessage): Promise<T> {
+  const raw = await readBodyRaw(req);
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new HttpError(400, "无效的 JSON");
+  }
+}
+
+/** 统一错误响应：HttpError 用其状态码，其余按 500 */
+function sendError(res: http.ServerResponse, err: unknown): void {
+  const status = err instanceof HttpError ? err.status : 500;
+  const message = err instanceof Error ? err.message : "失败";
+  if (!res.headersSent) {
+    res.writeHead(status, { "Content-Type": "application/json" });
+  }
+  res.end(JSON.stringify({ error: message }));
+}
 
 // ============================================================================
 // SSE MCP 传输会话管理
@@ -91,13 +275,16 @@ export function startWebServer(
   monitor: SerialMonitor,
   autoOpenBrowser: boolean = false,
   mcpServerFactory?: MCPServerFactory,
-  appVersion?: string
+  appVersion?: string,
+  onStarted?: (actualPort: number) => void,
+  password?: string
 ): http.Server {
+  if (password !== undefined) WEB_PASSWORD = password; // 启动时手动输入可覆盖
   const server = http.createServer((req, res) => {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (req.method === "OPTIONS") {
       res.writeHead(200);
@@ -107,6 +294,25 @@ export function startWebServer(
 
     const host = req.headers.host || `localhost:${port}`;
     const url = new URL(req.url || "/", `http://${host}`);
+
+    // POST /api/login — 远程登录（密码比对，成功发会话令牌）[免认证]
+    if (req.method === "POST" && url.pathname === "/api/login") {
+      handleLogin(req, res);
+      return;
+    }
+
+    // 认证：本机免密 / token 放行 / 密码模式远程需会话
+    if (!authPass(req, url)) {
+      const wantsPage = req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html");
+      if (wantsPage && WEB_PASSWORD) {
+        res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(loginPageHtml());
+      } else {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "未授权：远程访问需要密码登录" }));
+      }
+      return;
+    }
 
     // POST /send — Web 终端发送命令
     if (req.method === "POST" && url.pathname === "/send") {
@@ -193,56 +399,70 @@ export function startWebServer(
 
   // WebSocket — Xterm.js 真终端
   const wss = new WebSocketServer({ server });
+  // http server 的 EADDRINUSE 由下方 error 处理担当（端口回退）；
+  // wss attach 同一 server，listen 失败时 ws 库也会向 wss emit error，这里吞掉避免未捕获崩溃
+  wss.on("error", (err: Error) => {
+    if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+      console.error(`[WebServer] WebSocket 错误: ${err.message}`);
+    }
+  });
   wss.on("connection", (ws, req) => {
-    const name = (req.headers["user-agent"] || "ws").slice(0, 20);
+    // WebSocket 升级不走上面的 HTTP 回调，需在此单独走认证（本机免密 / token / 远程会话）
     const wsUrl = new URL(req.url || "/", "http://localhost");
+    if (!authPass(req, wsUrl)) {
+      try { ws.close(); } catch { /* ignore */ }
+      return;
+    }
+    const name = (req.headers["user-agent"] || "ws").slice(0, 20);
     const clientId = wsUrl.searchParams.get("clientId") || undefined;
     monitor.addWSClient(ws, name, clientId);
   });
 
-  server.listen(port, "0.0.0.0", () => {
+  // 端口自动回退：配置端口被占用时递增尝试（最多额外 10 个），实际端口由 listening 回调获取
+  let currentPort = port;
+  const tryListen = () => {
+    server.listen(currentPort, "0.0.0.0");
+  };
+  server.once("listening", () => {
+    const addr = server.address();
+    const actualPort = typeof addr === "object" && addr ? addr.port : currentPort;
     const LanIPs = getLanIPs();
-    console.error(`[WebServer] 串口实时终端: http://localhost:${port}`);
+    console.error(`[WebServer] 串口实时终端: http://localhost:${actualPort}`);
+    // 局域网 IP 合并为一行，避免多 IP 逐行刷屏
     if (LanIPs.length > 0) {
-      for (const Ip of LanIPs) {
-        console.error(`[WebServer] 局域网访问: http://${Ip}:${port}`);
-      }
-      console.error(`[WebServer] 提示: 如果局域网其他电脑无法访问，请检查 Windows 防火墙是否放行端口 ${port}`);
+      console.error(`[WebServer] 局域网访问: ${LanIPs.map((ip) => `http://${ip}:${actualPort}`).join(", ")}`);
+      console.error(`[WebServer] 提示: 如果局域网其他电脑无法访问，请检查 Windows 防火墙是否放行端口 ${actualPort}`);
     }
+    if (mcpServerFactory) {
+      console.error(`[WebServer] MCP over SSE: http://localhost:${actualPort}/mcp/sse`);
+    }
+    onStarted?.(actualPort);
     if (autoOpenBrowser) {
-      openBrowser(`http://localhost:${port}`);
+      openBrowser(`http://localhost:${actualPort}`);
     }
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      console.error(`[WebServer] 端口 ${port} 已被占用，Web 监视器未启动`);
-      console.error(`[WebServer] 请设置环境变量 WEB_PORT 更换端口`);
+      if (currentPort - port < 10) {
+        console.error(`[WebServer] 端口 ${currentPort} 被占用，尝试 ${currentPort + 1}`);
+        currentPort += 1;
+        tryListen();
+      } else {
+        console.error(`[WebServer] 端口 ${port}~${currentPort} 均被占用，Web 监视器未启动`);
+        console.error(`[WebServer] 请释放端口或设置环境变量 WEB_PORT 指定其他端口`);
+      }
     } else {
       console.error(`[WebServer] 启动失败: ${err.message}`);
     }
   });
 
+  tryListen();
+
   return server;
 }
 
 // ---- 工具函数 ----
-
-/** 从请求体中解析 JSON */
-function parseBody<T>(req: http.IncomingMessage): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(body) as T);
-      } catch (e) {
-        reject(new Error("无效的 JSON"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
 
 /** 校验是否为控制端 */
 function checkController(monitor: SerialMonitor, clientId: unknown): string | null {
@@ -267,9 +487,7 @@ async function handleGetPorts(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(ports));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "获取端口列表失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -300,9 +518,7 @@ async function handleConnect(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, ...monitor.getStatus() }));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "连接失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -329,9 +545,7 @@ async function handleDisconnect(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "断开失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -341,9 +555,7 @@ function handleSend(
   res: http.ServerResponse,
   monitor: SerialMonitor
 ): void {
-  let body = "";
-  req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-  req.on("end", async () => {
+  readBodyRaw(req).then(async (body) => {
     try {
       const { command, lineEnding, clientId } = JSON.parse(body) as SendRequestBody & { clientId?: string };
       if (!command || typeof command !== "string") {
@@ -352,8 +564,15 @@ function handleSend(
         return;
       }
       const le = typeof lineEnding === "string" ? lineEnding : "\n";
-      // 流式写入 (空行尾) 不需要控制权；完整命令需要
+      // 流式写入 (空行尾) 不需要控制权；完整命令需要控制端权限
       if (le !== "") {
+        monitor.pruneStaleClients();
+        // 全新 clientId 直接 /send：注册并立即接管控制（免先连 SSE 长连接）
+        if (clientId && typeof clientId === "string" && !monitor.isRegistered(clientId)) {
+          monitor.registerClient(clientId);
+          monitor.setController(clientId);
+        }
+        if (clientId && typeof clientId === "string") monitor.touchClient(clientId);
         const permErr = checkController(monitor, clientId);
         if (permErr) {
           res.writeHead(403, { "Content-Type": "application/json" });
@@ -365,10 +584,10 @@ function handleSend(
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : "发送失败";
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendError(res, err);
     }
+  }).catch((err) => {
+    sendError(res, err);
   });
 }
 
@@ -426,9 +645,7 @@ async function handleRequestControl(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, message: "已发送申请，等待控制端响应（10 秒超时自动同意）" }));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "申请失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -475,9 +692,7 @@ async function handleRespondControl(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, approved: approve }));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "响应失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -501,6 +716,13 @@ async function handleForceControl(
       return;
     }
 
+    // 未注册 clientId 不构成接管（修复假成功 200）
+    if (!monitor.isRegistered(clientId)) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "clientId 未注册（需先连 /events 或 /send 自动注册）" }));
+      return;
+    }
+
     // 清除该申请人之前待处理的请求
     const timeoutId = pendingRequests.get(clientId);
     if (timeoutId) {
@@ -513,9 +735,7 @@ async function handleForceControl(
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, message: "已强制接管控制权" }));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "强制接管失败";
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: message }));
+    sendError(res, err);
   }
 }
 
@@ -545,6 +765,15 @@ function handleSSE(
   res.write(": connected\n\n");
   monitor.addClient(clientId, res, name, ip);
 
+  // 20s 心跳：代理/客户端空闲断开后服务端残连接不回收；ping 保持长连接
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, 20000);
+
   // 发送结构化状态事件
   const statusPayload = JSON.stringify(monitor.getStatus());
   res.write(`event: status\ndata: ${statusPayload}\n\n`);
@@ -561,7 +790,9 @@ function handleSSE(
   }
 
   req.on("close", () => {
-    monitor.removeClient(clientId);
+    clearInterval(heartbeat);
+    // 传入 res 进行身份校验，避免旧连接断开误删新连接
+    monitor.removeClient(clientId, res);
   });
 }
 
