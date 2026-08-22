@@ -1,20 +1,26 @@
 #!/usr/bin/env node
+import { createRequire } from "module";
+import * as readline from "node:readline";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { SerialPort } from "serialport";
 import { SerialMonitor } from "./serial-monitor.js";
-import { startWebServer, openBrowser, getLanIPs } from "./web-server.js";
+import { startWebServer, openBrowser } from "./web-server.js";
 
 const SERIAL_PORT_ENV = process.env.SERIAL_PORT || "COM3";
 const SERIAL_BAUDRATE_ENV = parseInt(process.env.SERIAL_BAUDRATE || "115200", 10);
 const BUFFER_MAX_SIZE = parseInt(process.env.SERIAL_BUFFER_SIZE || "1048576", 10);
 const WEB_PORT = parseInt(process.env.WEB_PORT || "9721", 10);
+/** 实际生效的 Web 端口（端口被占用自动回退后更新；open_web_monitor 用实际端口） */
+let ACTUAL_WEB_PORT = WEB_PORT;
 const AUTO_CONNECT = process.env.SERIAL_AUTO_CONNECT === "true";
 const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN !== "false"; // 默认 true
 
 const monitor = new SerialMonitor(BUFFER_MAX_SIZE);
-const APP_VERSION = "2.3.0";
+// 版本号单一起源：读取 package.json，避免硬编码与发布版本不一致（如 v2.4.2 打印 2.3.0）
+const require = createRequire(import.meta.url);
+const APP_VERSION: string = require("../package.json").version;
 
 export function createMCPServer(monitor: SerialMonitor, version: string): Server {
   const server = new Server({ name: "serial-terminal", version }, { capabilities: { tools: {} } });
@@ -186,7 +192,7 @@ export function createMCPServer(monitor: SerialMonitor, version: string): Server
       }
 
       case "open_web_monitor": {
-        const url = `http://localhost:${WEB_PORT}`;
+        const url = `http://localhost:${ACTUAL_WEB_PORT}`;
         const opened = openBrowser(url);
         if (opened) {
           return { content: [{ type: "text", text: `✅ 已在 VS Code 内置浏览器中打开: ${url}` }] };
@@ -225,7 +231,32 @@ function formatBytes(bytes: number): string {
 // 主函数
 // ============================================================================
 async function main(): Promise<void> {
-  const webServer = startWebServer(WEB_PORT, monitor, WEB_AUTO_OPEN, createMCPServer, APP_VERSION);
+  // 启动时密码引导：env 缺失 → 终端给一次手动输入机会（必须在 MCP stdio connect 前，stdin 空闲）
+  const pwdFromEnv = process.env.SERIAL_WEB_PASSWORD || "";
+  let password = pwdFromEnv;
+  if (!pwdFromEnv && process.stdin.isTTY) {
+    password = await new Promise<string>((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      rl.question("⚠️ 未设置 SERIAL_WEB_PASSWORD\n请输入访问密码（留空=免密模式，远程可直接访问）: ", (ans) => {
+        rl.close();
+        resolve(ans.trim());
+      });
+    });
+    if (password) console.error("[MCP] ✅ 已通过手动输入设置访问密码（本次运行有效）");
+    else console.error("[MCP] 未设置访问密码，启用免密模式（远程可直接访问 Web）");
+  }
+
+  // 兜底：未捕获异常 / 未处理的 Promise 拒绝不应直接崩溃进程
+  process.on("uncaughtException", (err: Error) => {
+    console.error(`[MCP] 未捕获异常（已兜底，服务继续运行）: ${err.message}`);
+  });
+  process.on("unhandledRejection", (reason: unknown) => {
+    console.error(`[MCP] 未处理的 Promise 拒绝（已兜底）: ${reason instanceof Error ? reason.message : String(reason)}`);
+  });
+
+  const webServer = startWebServer(WEB_PORT, monitor, WEB_AUTO_OPEN, createMCPServer, APP_VERSION, (p) => {
+    ACTUAL_WEB_PORT = p; // 记录实际端口（可能因占用自动回退）
+  }, password);
 
   if (AUTO_CONNECT) {
     console.error(`[AutoConnect] → ${SERIAL_PORT_ENV} @ ${SERIAL_BAUDRATE_ENV} baud`);
@@ -240,21 +271,14 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   const server = createMCPServer(monitor, APP_VERSION);
   await server.connect(transport);
-  console.error(`[MCP] Serial Terminal v${APP_VERSION}`);
-  console.error(`[MCP] Web 终端: http://localhost:${WEB_PORT}`);
-  const LanIPs = getLanIPs();
-  if (LanIPs.length > 0) {
-    for (const Ip of LanIPs) {
-      console.error(`[MCP] 局域网访问: http://${Ip}:${WEB_PORT}`);
-    }
-    console.error(`[MCP] 提示: 防火墙需放行端口 ${WEB_PORT}`);
-  }
+  console.error(`[MCP] Serial Terminal v${APP_VERSION} (stdio)`);
   console.error(`[MCP] 自动连接: ${AUTO_CONNECT ? "启用" : "禁用"}`);
   console.error(`[MCP] Web 自动打开: ${WEB_AUTO_OPEN ? "启用" : "禁用"}`);
+  // 访问地址 / 局域网 / 防火墙提示由 WebServer 统一打印一次，此处不重复
 
   const shutdown = async () => {
     console.error("[MCP] 正在关闭...");
-    if (monitor.isActive()) await monitor.stop();
+    monitor.dispose();
     webServer.close();
     process.exit(0);
   };

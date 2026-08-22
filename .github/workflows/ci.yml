@@ -1,0 +1,39 @@
+# ============================================================================
+# CI — 所有分支通用：构建 + 测试
+# 触发：push / pull_request（任何分支）
+# 平台：GitHub Actions (ubuntu)
+# ============================================================================
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    name: build + test (Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]   # engines >=18，测有代表性的三个版本
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Verify web-server boot output (smoke)
+        run: |
+          timeout 5 node build/index.js 2>&1 | head -20 || true

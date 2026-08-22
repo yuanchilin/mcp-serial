@@ -5,3 +5,10 @@ package-lock.json
 .npmrc
 bootstrap.bat
 bootstrap.ps1
+
+# 联调工具/产物与测试产物, 不进库
+dev.bat
+handoff/
+patches/
+test-results/
+playwright-report/
