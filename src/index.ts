@@ -15,7 +15,8 @@ const WEB_PORT = parseInt(process.env.WEB_PORT || "9721", 10);
 /** 实际生效的 Web 端口（端口被占用自动回退后更新；open_web_monitor 用实际端口） */
 let ACTUAL_WEB_PORT = WEB_PORT;
 const AUTO_CONNECT = process.env.SERIAL_AUTO_CONNECT === "true";
-const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN !== "false"; // 默认 true
+// 默认 false：启动时不自动打开任何浏览器/窗口（需要时手动打开，或显式设 WEB_AUTO_OPEN=true）
+const WEB_AUTO_OPEN = process.env.WEB_AUTO_OPEN === "true";
 
 const monitor = new SerialMonitor(BUFFER_MAX_SIZE);
 // 版本号单一起源：读取 package.json，避免硬编码与发布版本不一致（如 v2.4.2 打印 2.3.0）

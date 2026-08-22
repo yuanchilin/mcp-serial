@@ -209,7 +209,7 @@ const sseTransports = new Map<string, SSEServerTransport>();
 
 let browserOpened = false;
 
-/** 打开 URL：优先 VS Code Simple Browser，备用系统浏览器。仅打开一次。 */
+/** 打开 URL：使用系统默认浏览器。仅当显式设置 WEB_AUTO_OPEN=true 或调用 open_web_monitor 工具时触发；启动时默认不打开。 */
 export function openBrowser(url: string): boolean {
   if (browserOpened) {
     console.error(`[WebServer] 浏览器已打开，跳过: ${url}`);
@@ -217,24 +217,22 @@ export function openBrowser(url: string): boolean {
   }
   browserOpened = true;
 
-  exec(`code --open-url "${url}"`, (err) => {
-    if (!err) return; // VS Code 打开成功
-
-    // 备用：系统默认浏览器
-    const platform = process.platform;
-    let command: string;
-    if (platform === "win32") {
-      command = `start "" "${url}"`;
-    } else if (platform === "darwin") {
-      command = `open "${url}"`;
-    } else {
-      command = `xdg-open "${url}"`;
+  // 不再使用 `code --open-url`（新版 VS Code 中该参数是布尔开关、不接受 URL，
+  // 只会弹出空窗口且退出码为 0，导致默认浏览器兜底永远不执行）。
+  // 直接用系统默认浏览器。
+  const platform = process.platform;
+  let command: string;
+  if (platform === "win32") {
+    command = `start "" "${url}"`;
+  } else if (platform === "darwin") {
+    command = `open "${url}"`;
+  } else {
+    command = `xdg-open "${url}"`;
+  }
+  exec(command, (err) => {
+    if (err) {
+      console.error(`[WebServer] 无法自动打开浏览器: ${err.message}`);
     }
-    exec(command, (err2) => {
-      if (err2) {
-        console.error(`[WebServer] 无法自动打开浏览器: ${err2.message}`);
-      }
-    });
   });
   return true;
 }

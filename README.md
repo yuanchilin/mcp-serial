@@ -45,7 +45,7 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 | serial_send | 发送命令并等待响应 |
 | serial_status | 查询连接状态和统计 |
 | serial_clear_buffer | 清空环形缓冲区 |
-| open_web_monitor | 在 VS Code 内置浏览器打开 Web 监视器 |
+| open_web_monitor | 在系统默认浏览器打开 Web 监视器 |
 
 ## 环境变量
 
@@ -55,7 +55,7 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 | SERIAL_BAUDRATE | 115200 | 波特率 |
 | SERIAL_AUTO_CONNECT | false | 启动时自动连接串口 |
 | WEB_PORT | 9721 | Web 监视器端口 |
-| WEB_AUTO_OPEN | true | 启动时自动打开浏览器 |
+| WEB_AUTO_OPEN | false | 启动时自动打开系统默认浏览器（显式设为 true 才开启；默认不打开任何窗口） |
 | SERIAL_BUFFER_SIZE | 1048576 | 环形缓冲区最大容量（字节） |
 | SERIAL_WEB_PASSWORD | (空) | Web 远程访问密码：本机访问免密；远程访问需密码登录（未设置时启动可手动输入一次；留空=免密模式，远程可直接访问） |
 
