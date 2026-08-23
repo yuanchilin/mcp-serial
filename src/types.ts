@@ -44,6 +44,18 @@ export interface ReadResult {
   newOffset: number;
 }
 
+/** 串口命令响应收集模式 */
+export type ResponseMode = "timeout" | "line" | "marker" | "regex" | "length";
+
+/** 串口命令发送选项 */
+export interface SerialSendOptions {
+  timeout?: number;
+  lineEnding?: string;
+  responseMode?: ResponseMode;
+  endMarker?: string;
+  expectedLength?: number;
+}
+
 /** HTTP POST /send 请求体 */
 export interface SendRequestBody {
   command: string;

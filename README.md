@@ -42,10 +42,19 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 | list_ports | 列出所有可用串口 |
 | serial_start / serial_stop | 打开 / 关闭串口 |
 | serial_read | 增量读取缓冲区新数据 |
-| serial_send | 发送命令并等待响应 |
+| serial_send | 发送命令并等待响应，支持 timeout / line / marker / regex / length 五种结束策略 |
 | serial_status | 查询连接状态和统计 |
 | serial_clear_buffer | 清空环形缓冲区 |
 | open_web_monitor | 在系统默认浏览器打开 Web 监视器 |
+
+`serial_send` 示例：
+
+```json
+{ "command": "AT\r\n", "timeout": 3000, "responseMode": "line" }
+{ "command": "AT\r\n", "timeout": 3000, "responseMode": "marker", "endMarker": "OK" }
+{ "command": "AT\r\n", "timeout": 3000, "responseMode": "regex", "endMarker": "OK|ERROR" }
+{ "command": "AT\r\n", "timeout": 3000, "responseMode": "length", "expectedLength": 8 }
+```
 
 ## 环境变量
 
@@ -57,6 +66,7 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 | WEB_PORT | 9721 | Web 监视器端口 |
 | WEB_AUTO_OPEN | false | 启动时自动打开系统默认浏览器（显式设为 true 才开启；默认不打开任何窗口） |
 | SERIAL_BUFFER_SIZE | 1048576 | 环形缓冲区最大容量（字节） |
+| SERIAL_RESPONSE_STABLE_MS | 2000 | `serial_send` 在 `timeout` 模式下判定响应稳定结束的静默窗口（毫秒）；调大可适配慢速设备 |
 | SERIAL_WEB_PASSWORD | (空) | Web 远程访问密码：本机访问免密；远程访问需密码登录（未设置时启动可手动输入一次；留空=免密模式，远程可直接访问） |
 
 ## 常见问题

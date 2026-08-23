@@ -555,7 +555,8 @@ function handleSend(
 ): void {
   readBodyRaw(req).then(async (body) => {
     try {
-      const { command, lineEnding, clientId } = JSON.parse(body) as SendRequestBody & { clientId?: string };
+      const raw = JSON.parse(body) as SendRequestBody & { clientId?: string };
+      const { command, lineEnding, clientId } = raw;
       if (!command || typeof command !== "string") {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "缺少 command 参数" }));
@@ -578,6 +579,7 @@ function handleSend(
           return;
         }
       }
+      // /send 仅负责原始写入，不等待响应；响应等待使用 MCP serial_send
       await monitor.sendRaw(command, le);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));

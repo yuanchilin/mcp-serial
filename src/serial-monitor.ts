@@ -1,4 +1,4 @@
-import type { SerialStatus } from "./types.js";
+import type { SerialStatus, SerialSendOptions, ResponseMode } from "./types.js";
 import { RingBuffer } from "./ring-buffer.js";
 import { SerialPort } from "serialport";
 import type { ServerResponse } from "http";
@@ -41,6 +41,7 @@ export class SerialMonitor {
   sseClients = new Map<string, ClientInfo>();
   wsClients = new Set<WSClient>();
   controllerClientId: string | null = null;
+  private sendQueue: Promise<void> = Promise.resolve();
   /** 跨 chunk 边界暂存的未完成 UTF-8 字节，拼接到下个 chunk */
   private pendingBytes: Buffer = Buffer.alloc(0);
 
@@ -106,7 +107,7 @@ export class SerialMonitor {
           const text = complete.toString("utf-8");
           this.buffer.append(text);
           this.broadcastSSE(text);
-          this.broadcastWS(Buffer.from(data));  /* WebSocket 原始字节 */
+          this.broadcastWS(complete);  /* 包含跨 chunk 拼接后的完整 UTF-8 字节 */
         }
       });
 
@@ -147,77 +148,169 @@ export class SerialMonitor {
     this.startedAt = null;
 
     return new Promise((resolve) => {
-      if (!sp.isOpen) { resolve(); return; }
+      if (!sp.isOpen) {
+        this.broadcastStatus();
+        resolve();
+        return;
+      }
       sp.close((err) => {
         if (err) console.error(`[SerialMonitor] 关闭错误: ${err.message}`);
         else console.error("[SerialMonitor] 串口已停止");
+        this.broadcastStatus();
         resolve();
       });
     });
-    this.broadcastStatus();
   }
 
   /**
-   * 发送命令并等待响应（修复：使用单一超时 + 短间隔轮询）
-   * 在超时时间内持续收集数据，超时后返回所有收集到的响应
+   * 发送命令并等待响应。
+   * responseMode:
+   * - timeout: 继续等待到超时，默认兼容历史行为
+   * - line: 读取到 CR/LF 结束符后立即返回
+   * - marker: 读取到 endMarker 指定字符串后立即返回
+   * - regex: 读取到 endMarker 正则表达式匹配后立即返回
+   * - length: 读取到 expectedLength 字节数后立即返回
    */
-  async send(command: string, lineEnding: string, timeout: number): Promise<string> {
+  async send(command: string, lineEnding: string, timeout: number, options: SerialSendOptions = {}): Promise<string> {
+    const run = this.sendQueue.then(() => this.sendNow(command, lineEnding, timeout, options));
+    this.sendQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async sendNow(command: string, lineEnding: string, timeout: number, options: SerialSendOptions = {}): Promise<string> {
     if (!this.serialPort || !this.serialPort.isOpen) {
       throw new Error("串口未打开，请先调用 serial_start");
     }
+
+    const mode: ResponseMode = options.responseMode || "timeout";
+    const stableThreshold = Math.max(
+      100,
+      Number.parseInt(process.env.SERIAL_RESPONSE_STABLE_MS || "2000", 10)
+    );
 
     return new Promise((resolve, reject) => {
       const preSendOffset = this.buffer.totalBytes;
       const sp = this.serialPort!;
       let polling = true;
+      let settled = false;
+      let timeoutId: NodeJS.Timeout | null = null;
+      let pollTimer: NodeJS.Timeout | null = null;
 
-      // 主超时定时器
-      const timeoutId = setTimeout(() => {
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (pollTimer) clearTimeout(pollTimer);
+      };
+
+      const buildResponse = (text: string): string => {
+        if (mode === "line") {
+          const idx = text.search(/\r\n|\n|\r/);
+          if (idx >= 0) return text.slice(0, idx + (text[idx] === "\r" && text[idx + 1] === "\n" ? 2 : 1));
+          return text;
+        }
+        if (mode === "marker") {
+          const marker = options.endMarker || "";
+          if (!marker) return text;
+          const idx = text.indexOf(marker);
+          if (idx >= 0) return text.slice(0, idx + marker.length);
+          return text;
+        }
+        if (mode === "regex") {
+          const pattern = options.endMarker || "";
+          if (!pattern) return text;
+          try {
+            const regex = new RegExp(pattern);
+            const match = regex.exec(text);
+            if (match && match.index >= 0) {
+              return text.slice(0, match.index + match[0].length);
+            }
+          } catch {
+            // 兜底：正则匹配失败时回退到超时等待模式
+          }
+          return text;
+        }
+        if (mode === "length") {
+          const expected = Number(options.expectedLength || 0);
+          if (!expected || expected <= 0) return text;
+          return Buffer.from(text, "utf-8").subarray(0, expected).toString("utf-8");
+        }
+        return text;
+      };
+
+      const shouldComplete = (text: string): boolean => {
+        if (text.length === 0) return false;
+        if (mode === "line") return /\r\n|\n|\r/.test(text);
+        if (mode === "marker") {
+          const marker = options.endMarker || "";
+          return !!marker && text.includes(marker);
+        }
+        if (mode === "regex") {
+          const pattern = options.endMarker || "";
+          if (!pattern) return false;
+          try { return new RegExp(pattern).test(text); } catch { return false; }
+        }
+        if (mode === "length") {
+          const expected = Number(options.expectedLength || 0);
+          return expected > 0 && Buffer.byteLength(text, "utf-8") >= expected;
+        }
+        return false;
+      };
+
+      const finish = (callback: () => string | PromiseLike<string>, shouldReject = false) => {
+        if (settled) return;
+        settled = true;
         polling = false;
+        cleanup();
+        if (shouldReject) {
+          reject(callback() as never);
+          return;
+        }
+        resolve(callback());
+      };
+
+      timeoutId = setTimeout(() => {
+        if (settled) return;
         const { text } = this.buffer.getSince(preSendOffset);
-        resolve(text || "(超时 - 无响应)");
+        finish(() => buildResponse(text) || "(超时 - 无响应)");
       }, timeout);
 
-      // 写入命令
       sp.write(command + lineEnding, (err) => {
         if (err) {
-          clearTimeout(timeoutId);
-          polling = false;
-          reject(err);
+          finish(() => {
+            throw err;
+          }, true);
           return;
         }
 
-        // 短间隔轮询：每 50ms 检查是否有新数据，最多等 2s 后认为响应完成
         let elapsed = 0;
         const pollInterval = 50;
-        const stableThreshold = 2000; // 连续无新数据则视为响应完成
         let lastTotalBytes = preSendOffset;
 
         const poll = () => {
-          if (!polling) return; // 超时已触发
+          if (!polling || settled) return;
 
-          elapsed += pollInterval;
+          const { text } = this.buffer.getSince(preSendOffset);
           const currentTotal = this.buffer.totalBytes;
+          elapsed += pollInterval;
 
           if (currentTotal > lastTotalBytes) {
-            // 有新数据到达，重置稳定计时
             lastTotalBytes = currentTotal;
+            elapsed = 0;
           }
 
-          if (elapsed >= stableThreshold) {
-            // 已等待足够长时间，认为响应完成
-            clearTimeout(timeoutId);
-            polling = false;
-            const { text } = this.buffer.getSince(preSendOffset);
-            resolve(text || "(无响应)");
+          if (mode !== "timeout" && shouldComplete(text)) {
+            finish(() => buildResponse(text) || "(无响应)");
             return;
           }
 
-          setTimeout(poll, pollInterval);
+          if (mode === "timeout" && elapsed >= stableThreshold) {
+            finish(() => text || "(无响应)");
+            return;
+          }
+
+          pollTimer = setTimeout(poll, pollInterval);
         };
 
-        // 从下一个事件循环开始轮询
-        setTimeout(poll, pollInterval);
+        pollTimer = setTimeout(poll, pollInterval);
       });
     });
   }

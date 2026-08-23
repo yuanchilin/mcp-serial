@@ -69,13 +69,27 @@ export function createMCPServer(monitor: SerialMonitor, version: string): Server
         },
         {
           name: "serial_send",
-          description: "通过已打开的持久化串口发送命令并等待响应。必须先调用 serial_start 打开串口（或已通过 AUTO_CONNECT 自动打开）。响应数据来自串口在发送后收到的数据。",
+          description: "通过已打开的持久化串口发送命令并等待响应。支持 timeout / line / marker / regex / length 五种结束策略，可精确控制串口响应判断。也支持通过 options 对象传入同一组参数以保持更规范的 API。",
           inputSchema: {
             type: "object",
             properties: {
               command: { type: "string", description: "要发送的命令文本" },
-              timeout: { type: "number", description: "等待响应的超时时间（毫秒），默认 2000" },
+              timeout: { type: "number", description: "等待响应的总超时时间（毫秒），默认 2000" },
               lineEnding: { type: "string", description: "行结束符，如 \\n, \\r\\n，默认 \\n" },
+              responseMode: { type: "string", description: "响应结束策略：timeout / line / marker / regex / length", enum: ["timeout", "line", "marker", "regex", "length"] },
+              endMarker: { type: "string", description: "marker / regex 模式使用的结束标记；regex 模式传正则字符串" },
+              expectedLength: { type: "number", description: "length 模式下期望读取的字节数" },
+              options: {
+                type: "object",
+                description: "统一的发送选项对象，支持 responseMode / endMarker / expectedLength。此对象和顶层字段可混用，顶层字段优先。",
+                properties: {
+                  timeout: { type: "number", description: "等待响应的总超时时间（毫秒）" },
+                  lineEnding: { type: "string", description: "行结束符" },
+                  responseMode: { type: "string", enum: ["timeout", "line", "marker", "regex", "length"] },
+                  endMarker: { type: "string" },
+                  expectedLength: { type: "number" },
+                },
+              },
             },
             required: ["command"],
           },
@@ -127,11 +141,11 @@ export function createMCPServer(monitor: SerialMonitor, version: string): Server
         const baudRate = Number(args.baudRate || SERIAL_BAUDRATE_ENV);
         if (monitor.isActive()) {
           const s = monitor.getStatus();
-          return { content: [{ type: "text", text: `串口已在运行中:\n  端口: ${s.port}\n  波特率: ${s.baudRate}\n  已运行: ${formatDuration(s.uptimeMs)}\n  已接收: ${formatBytes(s.stats.totalBytes)}\n\n如需重新连接，请先 serial_stop\n\nWeb: http://localhost:${WEB_PORT}` }] };
+          return { content: [{ type: "text", text: `串口已在运行中:\n  端口: ${s.port}\n  波特率: ${s.baudRate}\n  已运行: ${formatDuration(s.uptimeMs)}\n  已接收: ${formatBytes(s.stats.totalBytes)}\n\n如需重新连接，请先 serial_stop\n\nWeb: http://localhost:${ACTUAL_WEB_PORT}` }] };
         }
         try {
           await monitor.start(port, baudRate);
-          return { content: [{ type: "text", text: `✅ 串口已启动:\n  端口: ${port}\n  波特率: ${baudRate}\n  缓冲: ${formatBytes(BUFFER_MAX_SIZE)}\n\n📊 http://localhost:${WEB_PORT}\n\n💡 serial_send / serial_read / serial_status` }] };
+          return { content: [{ type: "text", text: `✅ 串口已启动:\n  端口: ${port}\n  波特率: ${baudRate}\n  缓冲: ${formatBytes(BUFFER_MAX_SIZE)}\n\n📊 http://localhost:${ACTUAL_WEB_PORT}\n\n💡 serial_send / serial_read / serial_status` }] };
         } catch (error) {
           return { content: [{ type: "text", text: `❌ 启动失败: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
         }
@@ -150,7 +164,7 @@ export function createMCPServer(monitor: SerialMonitor, version: string): Server
 
       case "serial_status": {
         const s = monitor.getStatus();
-        return { content: [{ type: "text", text: `串口状态:\n  连接: ${s.connected ? "✅" : "❌"}\n  端口: ${s.port || "N/A"}\n  波特率: ${s.baudRate || "N/A"}\n  运行: ${formatDuration(s.uptimeMs)}\n  已接收: ${formatBytes(s.stats.totalBytes)}\n  块数: ${s.stats.chunkCount}\n  缓冲上限: ${formatBytes(s.stats.bufferMaxSize)}\n  Agent未读: ${formatBytes(s.stats.totalBytes - monitor.buffer.agentReadOffset)}\n\nWeb: http://localhost:${WEB_PORT}` }] };
+        return { content: [{ type: "text", text: `串口状态:\n  连接: ${s.connected ? "✅" : "❌"}\n  端口: ${s.port || "N/A"}\n  波特率: ${s.baudRate || "N/A"}\n  运行: ${formatDuration(s.uptimeMs)}\n  已接收: ${formatBytes(s.stats.totalBytes)}\n  块数: ${s.stats.chunkCount}\n  缓冲上限: ${formatBytes(s.stats.bufferMaxSize)}\n  Agent未读: ${formatBytes(s.stats.totalBytes - monitor.buffer.agentReadOffset)}\n\nWeb: http://localhost:${ACTUAL_WEB_PORT}` }] };
       }
 
       case "serial_read":
@@ -164,10 +178,22 @@ export function createMCPServer(monitor: SerialMonitor, version: string): Server
         if (!monitor.isActive()) return { content: [{ type: "text", text: "❌ 串口未打开" }], isError: true };
         const cmd = String(args.command || "");
         if (!cmd) return { content: [{ type: "text", text: "命令不能为空" }], isError: true };
-        const timeout = Number(args.timeout || 2000);
-        const le = String(args.lineEnding || "\n");
+
+        const optionSource = (args.options && typeof args.options === "object") ? args.options as Record<string, unknown> : {};
+        const timeout = Number(args.timeout ?? optionSource.timeout ?? 2000);
+        const le = String(args.lineEnding ?? optionSource.lineEnding ?? "\n");
+        const responseMode = String(args.responseMode ?? optionSource.responseMode ?? "timeout");
+        const endMarker = typeof args.endMarker === "string" ? args.endMarker : typeof optionSource.endMarker === "string" ? optionSource.endMarker : "";
+        const expectedLength = Number(args.expectedLength ?? optionSource.expectedLength ?? 0);
+
         try {
-          const resp = await monitor.send(cmd, le, timeout);
+          const resp = await monitor.send(cmd, le, timeout, {
+            responseMode: ["timeout", "line", "marker", "regex", "length"].includes(responseMode)
+              ? responseMode as "timeout" | "line" | "marker" | "regex" | "length"
+              : "timeout",
+            endMarker,
+            expectedLength: Number.isFinite(expectedLength) && expectedLength > 0 ? expectedLength : undefined,
+          });
           return { content: [{ type: "text", text: resp }] };
         } catch (error) {
           return { content: [{ type: "text", text: `错误: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
