@@ -5,9 +5,15 @@ MCP 串口终端服务器 — 持久化串口通信 + Web 实时监视器。
 ## 功能特性
 
 - **持久化串口** — 一次打开，持续缓冲，`serial_read` 增量读取
-- **Web 实时终端** — 浏览器串口终端 `http://localhost:9721`，控制权分级（🎮 控制端 / 👁 监视端，可申请 / 强制接管）
+- **Web 实时终端** — 浏览器串口终端 `http://localhost:9721`：左侧设置栏（端口 / 波特率 / 控制权 / 实时统计）+ 顶栏状态徽标，控制权分级（🎮 控制端 / 👁 监视端，可申请 / 强制接管）
+- **界面自适应** — 宽屏侧栏可一键收起（状态本地记忆），窄屏（≤980px）自动收成抽屉；点击区 ≥28px，文字对比度 ≥4.5:1（WCAG AA）
+- **终端外观** — 深色 / 亮色 / 护眼 / 高对比四套配色（界面与终端一起换）+ 字号增减（也支持 Ctrl+滚轮），选择记在浏览器本地
+- **浏览器发文件** — 侧栏「发送文件」把**浏览器所在机器**上的文件按块（默认 16KB，可调块间延时）原始字节直写串口，用于灌固件 / HEX / SREC，带进度与取消
+- **打开即见历史** — 新建 WebSocket 连接时服务端补发环形缓冲区里已有的数据，新打开 / 刷新的页面不会只看到空白终端
+- **离线可用** — xterm 资源由服务端 `/vendor/xterm.js|css` 本地提供（仅在缺失时回退 CDN），纯局域网 / 断网环境同样可用
 - **SSE / WebSocket 双通道** — 浏览器事件流 + xterm.js 真终端
-- **MCP over SSE 远程传输** — `http://<host>:9721/mcp/sse`，局域网远程接入同一套工具
+- **MCP over Streamable HTTP 远程传输** — `http://<host>:9721/mcp`（POST/GET/DELETE 同一端点，有状态会话），局域网远程接入同一套工具
+  > ⚠️ 旧版 `http://<host>:9721/mcp/sse` + `/mcp/message`（legacy HTTP+SSE）随 SDK v2 移除，请求该路径会收到 **410** 与迁移提示
 - **终端交互** — 光标键盘输入、Ctrl+A~Z 控制字符、ESC 释放输入、时间戳/回显开关、复制/保存
 - **自动连接** — `SERIAL_AUTO_CONNECT=true` 启动即自动打开串口
 - **跨平台** — Windows 11 / WSL 2 / Ubuntu（原生 Node.js，WSL 无需端口转发）
@@ -35,6 +41,20 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 > ⚠️ 端口被占用时更换端口：`WEB_PORT=9722 mcp-serial`
 > WSL/Ubuntu 用户：串口路径用 `/dev/ttyUSB0`、`/dev/ttyS0` 等。
 
+## Web 界面
+
+| 区域 | 内容 |
+|---|---|
+| 顶栏 | ☰ 收起/展开设置栏（宽屏收起整栏、窄屏开合抽屉）、连接状态徽标（端口 · 波特率 · 控制端/监视端）、事件/终端两条通道指示灯、配色（深色/亮色/护眼/高对比）、字号 A−/A+ |
+| 侧栏 | 端口 + 刷新、波特率（含「自定义…」）、连接/断开、控制权（当前控制端 + 申请 / 强制接管）、清屏 / 复制 / 保存日志、**发送文件**（分块 + 块间延时 + 进度 + 取消）、实时统计（已接收 / 缓冲占用 / 数据块 / 运行时长 / 在线客户端） |
+| 终端 | xterm.js 真终端，点击后直接键盘输入；仅控制端可发送数据（键盘输入与文件传输同一规则） |
+
+- 「清屏」只清浏览器显示与本地缓存，**不影响服务端环形缓冲区**（服务端用 MCP 工具 `serial_clear_buffer`）
+- 快捷操作：`Ctrl + 滚轮` 缩放字号
+- 指示灯的语义：绿=已连接、黄=连接中/监视端、红=断开（鼠标悬停有说明）
+- 发送文件的 HTTP 接口：`POST /send-file?clientId=<控制端 id>`，请求体即原始字节，单块上限 1MB（前端默认 16KB/块）；非控制端返回 403，串口未打开返回 500
+- 终端历史：页面建立 WebSocket 时服务端会补发当前环形缓冲区内容（回放只发给该连接，不是广播），因此刷新 / 新开页面能立刻看到此前收到的数据；「清屏」只清本地显示，不影响下一次回放
+
 ## MCP 工具
 
 | 工具 | 功能 |
@@ -43,6 +63,8 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 | serial_start / serial_stop | 打开 / 关闭串口 |
 | serial_read | 增量读取缓冲区新数据 |
 | serial_send | 发送命令并等待响应，支持 timeout / line / marker / regex / length 五种结束策略 |
+| serial_write | 发送原始数据（不追加行尾、不等响应），用于逐字符交互输入 |
+| serial_send_file | 把一个**文件**按原始字节推给串口（不追加行尾、不等响应；二进制安全）。用于把固件/HEX/SREC 等整份镜像灌给板子（如 UART 加载器）。可选 `chunkSize` / `chunkDelayMs` / `progressEvery`，返回字节数、耗时与吞吐 |
 | serial_status | 查询连接状态和统计 |
 | serial_clear_buffer | 清空环形缓冲区 |
 | open_web_monitor | 在系统默认浏览器打开 Web 监视器 |
@@ -79,14 +101,16 @@ mcp-serial          # 或 npx @yuanchilin/mcp-serial
 
 ```
 src/
-├── index.ts          # MCP 服务器 + SSE/stdio 传输 + 主入口
-├── web-server.ts     # HTTP/SSE 服务器 + REST API + /mcp/sse
+├── index.ts          # MCP 服务器（SDK v2：McpServer + registerTool + zod v4）+ stdio 传输 + 主入口
+├── web-server.ts     # HTTP 服务器 + REST API + /mcp（Streamable HTTP）
 ├── serial-monitor.ts # 串口 + SSE 客户端 + 控制权管理
 ├── viewer.html       # Web 终端 HTML（自包含单页）
 ├── viewer-html.ts    # HTML 加载器
 ├── ring-buffer.ts    # 环形缓冲区
 └── types.ts          # 共享类型
 ```
+
+> 运行环境：**Node.js ≥ 20**（`@modelcontextprotocol/server` v2 的要求）。
 
 ## 脚本命令
 

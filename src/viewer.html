@@ -2,293 +2,953 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>串口终端</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d1117'/%3E%3Cpath d='M3.2 4.2l3 2.9-3 2.9' stroke='%233fb950' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.4 10.6h4.4' stroke='%2358a6ff' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<!-- xterm 资源优先走本地 /vendor（离线可用），失败自动回退 CDN -->
+<link rel="stylesheet" href="/vendor/xterm.css"
+      onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css'">
 <style>
+:root{
+  --sbw:236px;--top:46px;
+  --bg:#0d1117;--panel:#161b22;--panel-2:#1c2128;--panel-3:#262d36;
+  --border:#30363d;--border-strong:#4a5561;
+  --text:#e6edf3;--muted:#9aa4b2;--accent:#2f81f7;--accent-hover:#4b93f8;
+  --ok:#3fb950;--warn:#d29922;--err:#f85149;--off:#6e7681;
+  --danger-bg:#3d1418;--danger-bg-hover:#52191f;--danger-border:#7d2b31;--danger-text:#ffb4b0;
+  --scroll:#39414d;--scroll-hover:#4d5765;
+  --t-bg:#0d1117;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;height:100vh;display:flex;flex-direction:column}
-#bar{background:#111;padding:3px 8px;display:flex;gap:6px;align-items:center;font:11px Consolas,monospace;color:#c0c0c0;flex-shrink:0;border-bottom:1px solid #222}
-#bar select,#bar button{background:#000;color:#c0c0c0;border:1px solid #333;padding:2px 8px;font:inherit;cursor:pointer}
-#bar button:hover{background:#222}
-#bar .st{color:#888;margin-left:auto}
-#bar .ctrl-btn{display:none}
-#term{height:calc(100vh - 30px);overflow:hidden}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);
+  font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  display:grid;
+  grid-template-columns:var(--sbw) minmax(0,1fr);
+  grid-template-rows:var(--top) minmax(0,1fr);
+  height:100vh;height:100dvh;overflow:hidden;
+}
+
+/* ---------- 通用控件 ---------- */
+button,select,input{font:inherit;color:var(--text);background:var(--panel-2);
+  border:1px solid var(--border);border-radius:6px;height:32px;padding:0 10px;
+  cursor:pointer;transition:background .12s,border-color .12s}
+button:hover,select:hover{background:var(--panel-3);border-color:var(--border-strong)}
+button:active{transform:translateY(1px)}
+button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+button.danger{background:var(--danger-bg);border-color:var(--danger-border);color:var(--danger-text)}
+button.danger:hover{background:var(--danger-bg-hover);border-color:var(--danger-border)}
+button.ghost{background:transparent}
+button.icon{width:34px;padding:0;display:inline-grid;place-items:center}
+button:disabled{opacity:.45;cursor:not-allowed}
+select{width:100%}
+input[type=number]{width:100%}
+
+/* ---------- 顶栏 ---------- */
+#topbar{grid-column:1/-1;display:flex;align-items:center;gap:10px;
+  padding:0 10px;background:var(--panel);border-bottom:1px solid var(--border);min-width:0}
+#brand{display:flex;align-items:center;gap:7px;font-weight:600;white-space:nowrap}
+#brand .logo{color:var(--ok);font-family:Consolas,monospace}
+.spacer{flex:1 1 auto;min-width:0}
+.badge{display:inline-flex;align-items:center;gap:7px;padding:3px 11px;border-radius:999px;
+  border:1px solid var(--border);background:var(--panel-2);font-size:12px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:46vw}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--off);flex:0 0 auto}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(63,185,80,.16)}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 3px rgba(210,153,34,.16)}
+.dot.err{background:var(--err);box-shadow:0 0 0 3px rgba(248,81,73,.16)}
+.dot.flash{background:var(--ok);box-shadow:0 0 0 3px rgba(63,185,80,.34)}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);
+  border:1px solid var(--border);border-radius:999px;padding:2px 9px;white-space:nowrap}
+
+/* ---------- 侧边栏 ---------- */
+#sidebar{grid-row:2;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;gap:15px;padding:13px;overflow-y:auto;min-height:0}
+#sidebar::-webkit-scrollbar{width:10px}
+#sidebar::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+.sec{display:flex;flex-direction:column;gap:8px}
+.sec>h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;color:var(--muted);text-transform:uppercase}
+.row{display:flex;gap:8px;min-width:0}
+.row>*{flex:1 1 0;min-width:0}
+.field{display:flex;flex-direction:column;gap:4px}
+.field>label{font-size:11px;color:var(--muted)}
+.stat{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
+.stat b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+#bar-buf{height:6px;border-radius:3px;background:var(--panel-2);border:1px solid var(--border);overflow:hidden}
+#bar-buf>i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+#bar-file{height:6px;border-radius:3px;background:var(--panel-2);border:1px solid var(--border);overflow:hidden}
+#bar-file>i{display:block;height:100%;width:0;background:var(--ok);transition:width .2s}
+#fileProg{display:flex;flex-direction:column;gap:7px;padding:9px;border:1px solid var(--border);
+  border-radius:6px;background:var(--panel-2)}
+#fileProg[hidden]{display:none}
+.hint{font-size:11.5px;line-height:1.7;color:var(--muted)}
+.sep{height:1px;background:var(--border);margin:1px 0}
+
+/* ---------- 终端区 ---------- */
+#main{grid-row:2;grid-column:2;position:relative;min-width:0;min-height:0;background:var(--t-bg)}
+#term{position:absolute;inset:8px 10px}
 .xterm{height:100%}
 .xterm-viewport{height:100%!important}
-#ctrl-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:99}
-#ctrl-dialog{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#222;border:1px solid #444;border-radius:4px;padding:20px 24px;z-index:100;color:#c0c0c0;font:13px Consolas,monospace;min-width:280px}
-#ctrl-dialog h3{margin:0 0 12px;color:#fff;font-size:14px}
-#ctrl-dialog p{margin:0 0 16px;line-height:1.5}
-#ctrl-dialog button{margin-right:8px;padding:4px 16px;background:#000;color:#c0c0c0;border:1px solid #333;cursor:pointer;font:inherit}
-#ctrl-dialog button:hover{background:#333}
-#ctrl-dialog .btn-approve{background:#150;border-color:#363}
-#ctrl-dialog .btn-approve:hover{background:#252}
-#ctrl-dialog .btn-reject{background:#300;border-color:#633}
-#ctrl-dialog .btn-reject:hover{background:#422}
-#toast{position:fixed;top:40px;right:20px;background:#222;color:#c0c0c0;padding:8px 16px;border:1px solid #444;border-radius:2px;font:12px Consolas,monospace;z-index:200;display:none;max-width:360px}
+.xterm-viewport::-webkit-scrollbar{width:11px}
+.xterm-viewport::-webkit-scrollbar-track{background:transparent}
+.xterm-viewport::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:6px;border:3px solid transparent;background-clip:content-box}
+.xterm-viewport::-webkit-scrollbar-thumb:hover{background:var(--scroll-hover);background-clip:content-box}
+#tobottom{position:absolute;right:18px;bottom:18px;height:32px;border-radius:16px;display:none;
+  box-shadow:0 4px 16px rgba(0,0,0,.5);background:var(--panel-3)}
+
+/* ---------- 弹窗 / 提示 ---------- */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200}
+.modal.open{display:block}
+.modal-box{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px 20px;
+  z-index:201;min-width:min(330px,90vw);box-shadow:0 20px 50px rgba(0,0,0,.6)}
+.modal-box.open{display:block}
+.modal-box h3{font-size:14px;margin-bottom:10px}
+.modal-box p{font-size:13px;color:var(--muted);line-height:1.55;margin-bottom:16px}
+#toasts{position:fixed;top:calc(var(--top) + 10px);right:14px;z-index:220;
+  display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;max-width:min(360px,88vw)}
+.toast{pointer-events:auto;background:var(--panel-2);border:1px solid var(--border);
+  border-left:3px solid var(--accent);border-radius:6px;padding:8px 12px;font-size:12.5px;
+  box-shadow:0 6px 20px rgba(0,0,0,.45);animation:tin .16s ease-out;word-break:break-word}
+.toast.ok{border-left-color:var(--ok)}
+.toast.warn{border-left-color:var(--warn)}
+.toast.err{border-left-color:var(--err)}
+@keyframes tin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+#scrim{display:none}
+
+/* ---------- 宽屏：侧边栏可整体收起 ---------- */
+@media (min-width:981px){
+  body.nav-collapsed{grid-template-columns:minmax(0,1fr)}
+  body.nav-collapsed #sidebar{display:none}
+  body.nav-collapsed #main{grid-column:1}
+}
+
+/* ---------- 窄屏：侧边栏变抽屉 ---------- */
+@media (max-width:980px){
+  body{grid-template-columns:minmax(0,1fr)}
+  #main{grid-column:1}
+  #sidebar{position:fixed;top:var(--top);left:0;bottom:0;width:min(286px,86vw);z-index:120;
+    transform:translateX(-101%);transition:transform .18s ease;box-shadow:0 0 34px rgba(0,0,0,.55)}
+  body.nav-open #sidebar{transform:none}
+  #scrim{position:fixed;left:0;right:0;top:var(--top);bottom:0;background:rgba(0,0,0,.5);z-index:110}
+  body.nav-open #scrim{display:block}
+}
+@media (max-width:620px){
+  #brand .t{font-size:0}
+  .pill .lbl{display:none}
+  .badge{max-width:38vw}
+}
 </style>
 </head>
 <body>
-<div id="bar">
-  <select id="ps"><option value="">-- 端口 --</option></select>
-  <button onclick="rp()">刷新</button>
-  <select id="bs">
-    <option value="9600">9600</option><option value="115200" selected>115200</option>
-    <option value="230400">230400</option><option value="460800">460800</option><option value="921600">921600</option>
+
+<div id="topbar">
+  <button id="navToggle" class="icon ghost" onclick="toggleNav()" aria-label="收起或展开设置面板" aria-expanded="true" title="收起 / 展开设置面板">☰</button>
+  <div id="brand"><span class="logo" aria-hidden="true">&gt;_</span><span class="t">串口终端</span></div>
+  <span class="badge" id="badge" role="status" aria-live="polite">
+    <i class="dot" id="dot"></i><span id="badgeText">未连接</span>
+  </span>
+  <span class="spacer"></span>
+  <span class="pill" id="pillSse" title="事件通道（SSE）：状态与数据推送"><i class="dot" id="dotSse"></i><span class="lbl">事件</span></span>
+  <span class="pill" id="pillWs" title="终端通道（WebSocket）：串口原始数据"><i class="dot" id="dotWs"></i><span class="lbl">终端</span></span>
+  <select id="theme" onchange="setTheme(this.value)" title="界面与终端配色" aria-label="界面与终端配色" style="width:auto">
+    <option value="dark">深色</option>
+    <option value="light">亮色</option>
+    <option value="sepia">护眼</option>
+    <option value="contrast">高对比</option>
   </select>
-  <button id="cb" onclick="tc()">连接</button>
-  <button class="ctrl-btn" id="reqBtn" onclick="requestControl()">申请控制</button>
-  <button class="ctrl-btn" id="forceBtn" onclick="forceControl()">强制接管</button>
-  <button onclick="T.clear()">清除</button>
-  <button onclick="copyText()">复制</button>
-  <button onclick="saveText()">保存</button>
-  <span class="st" id="st">未连接</span>
-  <span id="wsdb" style="color:#555;font-size:10px">WS:--</span>
+  <button class="icon" onclick="bumpFont(-1)" title="减小字号" aria-label="减小字号">A−</button>
+  <button class="icon" onclick="bumpFont(1)" title="增大字号（也可 Ctrl + 滚轮）" aria-label="增大字号">A+</button>
 </div>
-<div id="term"></div>
 
-<div id="ctrl-overlay"></div>
-<div id="ctrl-dialog">
-  <h3>控制权申请</h3>
+<aside id="sidebar">
+  <div class="sec">
+    <h2>串口</h2>
+    <div class="field">
+      <label for="ps">端口</label>
+      <div class="row">
+        <select id="ps" aria-label="串口端口"></select>
+        <button onclick="rp()" title="重新扫描串口" style="flex:0 0 auto">刷新</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="bs">波特率</label>
+      <select id="bs" aria-label="波特率">
+        <option value="1200">1200</option>
+        <option value="2400">2400</option>
+        <option value="4800">4800</option>
+        <option value="9600">9600</option>
+        <option value="19200">19200</option>
+        <option value="38400">38400</option>
+        <option value="57600">57600</option>
+        <option value="115200" selected>115200</option>
+        <option value="230400">230400</option>
+        <option value="460800">460800</option>
+        <option value="921600">921600</option>
+        <option value="custom">自定义…</option>
+      </select>
+    </div>
+    <button id="cb" class="primary" onclick="tc()">连接</button>
+  </div>
+
+  <div class="sep"></div>
+
+  <div class="sec" id="ctrlSec" hidden>
+    <h2>控制权</h2>
+    <div class="stat"><span>当前控制端</span><b id="ctrlWho">—</b></div>
+    <div class="row">
+      <button id="reqBtn" onclick="requestControl()">申请控制</button>
+      <button id="forceBtn" class="danger" onclick="forceControl()">强制接管</button>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>操作</h2>
+    <div class="row">
+      <button onclick="clearScreen()" title="只清浏览器显示与本地缓存，不影响服务端缓冲区（服务端请用 MCP 工具 serial_clear_buffer）">清屏</button>
+      <button onclick="copyText()">复制</button>
+    </div>
+    <button onclick="saveText()">保存日志</button>
+  </div>
+
+  <div class="sec">
+    <h2>发送文件</h2>
+    <button id="sendFileBtn" onclick="pickFile()" title="把本地文件的原始字节直接写入串口（二进制安全，不追加行尾、不等待响应）">选择文件并发送…</button>
+    <div class="row">
+      <div class="field"><label for="chunkKB">分块 (KB)</label>
+        <input id="chunkKB" type="number" min="1" max="1024" step="1" value="16" aria-label="每块字节数（KB）"></div>
+      <div class="field"><label for="chunkDelay">块间延时 (ms)</label>
+        <input id="chunkDelay" type="number" min="0" max="5000" step="1" value="0" aria-label="每块之间延时（毫秒）"></div>
+    </div>
+    <input type="file" id="filePick" hidden>
+    <div id="fileProg" hidden>
+      <div class="stat"><span id="fileProgName">—</span><b id="fileProgPct">0%</b></div>
+      <div id="bar-file"><i id="fileFill"></i></div>
+      <div class="stat"><span id="fileProgText">0 B / 0 B</span><b id="fileRate">—</b></div>
+      <button class="danger" onclick="cancelSend()">取消发送</button>
+    </div>
+    <p class="hint">原始字节直写串口，用于灌固件 / HEX / SREC。<br>仅控制端可用；发送大文件请酌情加大块间延时。</p>
+  </div>
+
+  <div class="sec" id="statsSec" hidden>
+    <h2>统计</h2>
+    <div class="stat"><span>已接收</span><b id="stRecv">0 B</b></div>
+    <div class="stat"><span>缓冲占用</span><b id="stBuf">0 B</b></div>
+    <div id="bar-buf"><i id="bufFill"></i></div>
+    <div class="stat"><span>数据块</span><b id="stChunks">0</b></div>
+    <div class="stat"><span>运行时长</span><b id="stUp">—</b></div>
+    <div class="stat"><span>在线客户端</span><b id="stClients">0</b></div>
+  </div>
+
+  <div class="sec">
+    <h2>提示</h2>
+    <p class="hint">
+      Ctrl + 滚轮 缩放字号<br>
+      点击终端后可直接键盘输入<br>
+      控制端才能发数据，监视端只读<br>
+      「清屏」不清理服务端缓冲区
+    </p>
+  </div>
+</aside>
+<div id="scrim" onclick="toggleNav(false)"></div>
+
+<main id="main">
+  <div id="term"></div>
+  <button id="tobottom" onclick="scrollBottom()">↓ 回到最新</button>
+</main>
+
+<div class="modal" id="ctrlOverlay"></div>
+<div class="modal-box" id="ctrlDialog" role="dialog" aria-modal="true" aria-labelledby="ctrlTitle">
+  <h3 id="ctrlTitle">控制权申请</h3>
   <p id="ctrl-msg"></p>
-  <button class="btn-approve" onclick="respondControl(true)">同意</button>
-  <button class="btn-reject" onclick="respondControl(false)">拒绝</button>
+  <div class="row">
+    <button class="primary" onclick="respondControl(true)">同意</button>
+    <button class="danger" onclick="respondControl(false)">拒绝</button>
+  </div>
 </div>
-<div id="toast"></div>
+<div id="toasts" aria-live="polite"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script>
+'use strict';
+
+// ============================ 基础工具 ============================
+const $ = (id) => document.getElementById(id);
 function genId(){return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{let r=Math.random()*16|0;return(c==='x'?r:r&0x3|0x8).toString(16)})}
-const CID=sessionStorage.getItem('xtermCid')||(sessionStorage.setItem('xtermCid',genId()),sessionStorage.getItem('xtermCid'));
-const B=window.location.origin;
-// 可选访问令牌/会话：访问 http://host:9721/?token=XXX 或登录后 ?session=XXX，自动透传给所有请求
-const TOKEN=new URLSearchParams(location.search).get('token')||'';
-const SESSION=new URLSearchParams(location.search).get('session')||'';
+const CID = sessionStorage.getItem('xtermCid') || (sessionStorage.setItem('xtermCid', genId()), sessionStorage.getItem('xtermCid'));
+const B = window.location.origin;
+// 可选访问令牌/会话：http://host:9721/?token=XXX 或登录后 ?session=XXX，自动透传给所有请求
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const SESSION = new URLSearchParams(location.search).get('session') || '';
 function tk(u){
-  let s=u;
-  if(TOKEN){s+=(s.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN);}
-  if(SESSION){s+=(s.includes('?')?'&':'?')+'session='+encodeURIComponent(SESSION);}
+  let s = u;
+  if (TOKEN) s += (s.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+  if (SESSION) s += (s.includes('?') ? '&' : '?') + 'session=' + encodeURIComponent(SESSION);
   return s;
 }
-let ws=null,conn=false,log='',isController=false,evtSrc=null;
-let pendingRequesterId=null;
+function fmtBytes(n){
+  if (!n) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+function fmtDur(ms){
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60;
+  return h ? h + ' h ' + m + ' m' : (m ? m + ' m ' + ss + ' s' : ss + ' s');
+}
 
-const T=new Terminal({fontSize:15,fontFamily:'Consolas,Monaco,monospace',
-  theme:{background:'#000',foreground:'#c0c0c0',cursor:'#fff',selectionBackground:'#444',selectionForeground:'#fff'}});
-T.open(document.getElementById('term'));
-T.focus();
+// ============================ Toast 提示 ============================
+function toast(msg, kind, ms){
+  const box = $('toasts');
+  while (box.children.length >= 4) box.removeChild(box.firstChild);
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity .2s';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 220);
+  }, ms || 2600);
+}
 
-// 全屏自适应
+// ============================ 状态与图标 ============================
+let T = null, ws = null, conn = false, log = '', isController = false;
+let evtSrc = null, pendingRequesterId = null, statusCache = null, wsRetry = null, pollTimer = null, lastSendWarn = 0;
+
+function setDot(id, state, title){
+  const d = $(id);
+  if (!d) return;
+  d.className = 'dot' + (state ? ' ' + state : '');
+  if (title) d.title = title;
+}
+function setBadge(state, text, title){
+  $('dot').className = 'dot' + (state ? ' ' + state : '');
+  $('badgeText').textContent = text;
+  $('badge').title = title || text;
+}
+
+// ============================ 主题与字号 ============================
+// 每套主题同时覆盖：界面 CSS 变量(vars) + xterm 调色板(term)
+const THEMES = {
+  dark: {
+    label: '深色',
+    vars: {
+      '--bg':'#0d1117','--panel':'#161b22','--panel-2':'#1c2128','--panel-3':'#262d36',
+      '--border':'#30363d','--border-strong':'#4a5561','--text':'#e6edf3','--muted':'#9aa4b2',
+      '--accent':'#2f81f7','--accent-hover':'#4b93f8','--ok':'#3fb950','--warn':'#d29922',
+      '--err':'#f85149','--off':'#6e7681','--t-bg':'#0d1117',
+      '--danger-bg':'#3d1418','--danger-bg-hover':'#52191f','--danger-border':'#7d2b31','--danger-text':'#ffb4b0',
+      '--scroll':'#39414d','--scroll-hover':'#4d5765'
+    },
+    term: { bg:'#0d1117', fg:'#e6edf3', cursor:'#58a6ff', sel:'#264f78', selFg:'#ffffff' }
+  },
+  light: {
+    label: '亮色',
+    vars: {
+      '--bg':'#f6f8fa','--panel':'#ffffff','--panel-2':'#f6f8fa','--panel-3':'#eaeef2',
+      '--border':'#d0d7de','--border-strong':'#afb8c1','--text':'#1f2328','--muted':'#57606a',
+      '--accent':'#0969da','--accent-hover':'#0a5fc4','--ok':'#1a7f37','--warn':'#9a6700',
+      '--err':'#cf222e','--off':'#8c959f','--t-bg':'#ffffff',
+      '--danger-bg':'#ffebe9','--danger-bg-hover':'#ffd8d3','--danger-border':'#ffc1bc','--danger-text':'#cf222e',
+      '--scroll':'#c9d1d9','--scroll-hover':'#b1b9c1'
+    },
+    term: { bg:'#ffffff', fg:'#1f2328', cursor:'#0969da', sel:'#b6d7ff', selFg:'#1f2328' }
+  },
+  sepia: {
+    label: '护眼',
+    vars: {
+      '--bg':'#1f1b16','--panel':'#26211a','--panel-2':'#2e281f','--panel-3':'#3a3226',
+      '--border':'#4a4033','--border-strong':'#6b5c47','--text':'#e8dfd0','--muted':'#b3a591',
+      '--accent':'#d0a35c','--accent-hover':'#e0b56e','--ok':'#7fb069','--warn':'#d9a441',
+      '--err':'#e06c75','--off':'#8a7c68','--t-bg':'#1f1b16',
+      '--danger-bg':'#3a241f','--danger-bg-hover':'#4d2f28','--danger-border':'#7a4a3c','--danger-text':'#f0b8ae',
+      '--scroll':'#5a4e3d','--scroll-hover':'#6f6049'
+    },
+    term: { bg:'#1f1b16', fg:'#d8cfc0', cursor:'#e0a458', sel:'#4a3b28', selFg:'#f0e8dc' }
+  },
+  contrast: {
+    label: '高对比',
+    vars: {
+      '--bg':'#000000','--panel':'#000000','--panel-2':'#0a0a0a','--panel-3':'#1a1a1a',
+      '--border':'#6e6e6e','--border-strong':'#a0a0a0','--text':'#ffffff','--muted':'#dcdcdc',
+      '--accent':'#0a5fd0','--accent-hover':'#0f74ff','--ok':'#00e676','--warn':'#ffd400',
+      '--err':'#ff5252','--off':'#9e9e9e','--t-bg':'#000000',
+      '--danger-bg':'#3a0000','--danger-bg-hover':'#5c0000','--danger-border':'#ff5252','--danger-text':'#ffb3b3',
+      '--scroll':'#7a7a7a','--scroll-hover':'#a0a0a0'
+    },
+    term: { bg:'#000000', fg:'#ffffff', cursor:'#00ffff', sel:'#0050a0', selFg:'#ffffff' }
+  }
+};
+let themeKey = localStorage.getItem('termTheme') || 'dark';
+if (!THEMES[themeKey]) themeKey = 'dark';
+let fontSize = Number(localStorage.getItem('termFontSize')) || 15;
+if (!Number.isFinite(fontSize) || fontSize < 8 || fontSize > 32) fontSize = 15;
+
+function applyTheme(){
+  const t = THEMES[themeKey];
+  for (const [k, v] of Object.entries(t.vars)) document.documentElement.style.setProperty(k, v);
+  $('theme').value = themeKey;
+  if (T){
+    T.options.theme = { background:t.term.bg, foreground:t.term.fg, cursor:t.term.cursor,
+      selectionBackground:t.term.sel, selectionForeground:t.term.selFg };
+    fit();
+  }
+}
+function setTheme(k){
+  if (!THEMES[k]) return;
+  themeKey = k;
+  localStorage.setItem('termTheme', k);
+  applyTheme();
+  toast('配色：' + $('theme').selectedOptions[0].textContent, 'info', 1500);
+}
+function bumpFont(d){
+  const next = Math.min(32, Math.max(8, fontSize + d));
+  if (next === fontSize) return;
+  fontSize = next;
+  localStorage.setItem('termFontSize', String(fontSize));
+  if (T){ T.options.fontSize = fontSize; fit(); }
+  toast('字号 ' + fontSize + ' px', 'info', 1300);
+}
+
+// ============================ 自适应尺寸 ============================
+const meas = document.createElement('span');
+meas.setAttribute('aria-hidden', 'true');
+meas.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;top:-9999px';
+meas.textContent = 'W';
 function fit(){
-  let el=document.getElementById('term');
-  let w=el.clientWidth, h=el.clientHeight;
-  if(w<10||h<10)return;
-  let m=document.createElement('span');
-  m.style.font=T.options.fontSize+'px '+T.options.fontFamily;
-  m.style.position='absolute';m.style.visibility='hidden';
-  m.textContent='W';document.body.appendChild(m);
-  let cw=m.getBoundingClientRect().width;
-  let ch=T.options.fontSize*1.35;
-  document.body.removeChild(m);
-  T.resize(Math.floor(w/cw), Math.floor(h/ch));
+  if (!T) return;
+  const el = $('term');
+  const w = el.clientWidth, h = el.clientHeight;
+  if (w < 20 || h < 20) return;
+  if (!meas.isConnected) document.body.appendChild(meas);
+  meas.style.font = T.options.fontSize + 'px ' + T.options.fontFamily;
+  const cw = meas.getBoundingClientRect().width || 8;
+  const ch = T.options.fontSize * 1.35;
+  T.resize(Math.max(2, Math.floor(w / cw)), Math.max(2, Math.floor(h / ch)));
 }
-setTimeout(fit,100);setTimeout(fit,500);window.addEventListener('resize',fit);
+function scheduleFit(){
+  requestAnimationFrame(() => fit());
+}
+window.addEventListener('resize', scheduleFit);
 
-// Ctrl+滚轮缩放
-T.element.addEventListener('wheel',e=>{
-  if(e.ctrlKey){e.preventDefault();let s=T.options.fontSize||15;s+=e.deltaY>0?-1:1;if(s>=8&&s<=32){T.options.fontSize=s;fit()}}
-},{passive:false});
-
-const ps=document.getElementById('ps'),bs=document.getElementById('bs');
-const cb=document.getElementById('cb'),st=document.getElementById('st');
-const reqBtn=document.getElementById('reqBtn'),forceBtn=document.getElementById('forceBtn');
-
-// ---- Toast 通知 ----
-let toastTimer=null;
-function toast(msg){
-  let el=document.getElementById('toast');
-  el.textContent=msg;el.style.display='block';
-  if(toastTimer)clearTimeout(toastTimer);
-  toastTimer=setTimeout(()=>{el.style.display='none'},3000);
+// ============================ 设置面板开合 ============================
+// 窄屏(≤980px)：侧栏是抽屉，用 nav-open 控制；宽屏：整栏收起，用 nav-collapsed 控制（记忆到本地）
+const isNarrow = () => window.matchMedia('(max-width:980px)').matches;
+function toggleNav(force){
+  const btn = $('navToggle');
+  if (isNarrow()){
+    const open = (force === undefined) ? !document.body.classList.contains('nav-open') : !!force;
+    document.body.classList.toggle('nav-open', open);
+    if (btn) btn.setAttribute('aria-expanded', String(open));
+  }else{
+    const collapsed = (force === undefined) ? !document.body.classList.contains('nav-collapsed') : !force;
+    document.body.classList.toggle('nav-collapsed', collapsed);
+    localStorage.setItem('navCollapsed', collapsed ? '1' : '0');
+    if (btn) btn.setAttribute('aria-expanded', String(!collapsed));
+    toast(collapsed ? '设置面板已收起（点 ☰ 展开）' : '设置面板已展开', 'info', 1400);
+  }
+  setTimeout(scheduleFit, 210);
+}
+// 启动时恢复宽屏收起状态
+if (!isNarrow() && localStorage.getItem('navCollapsed') === '1'){
+  document.body.classList.add('nav-collapsed');
+  const b = $('navToggle'); if (b) b.setAttribute('aria-expanded', 'false');
 }
 
-// ---- 控制权对话框 ----
+// ============================ 控制权对话框 ============================
 function showCtrlDialog(requesterId, requesterName){
-  pendingRequesterId=requesterId;
-  document.getElementById('ctrl-msg').textContent=
-    '客户端 '+(requesterName||requesterId.slice(0,8))+' 申请控制权，是否同意？';
-  document.getElementById('ctrl-overlay').style.display='block';
-  document.getElementById('ctrl-dialog').style.display='block';
+  pendingRequesterId = requesterId;
+  $('ctrl-msg').textContent = '客户端 ' + (requesterName || requesterId.slice(0, 8)) + ' 申请控制权，是否同意？';
+  $('ctrlOverlay').classList.add('open');
+  $('ctrlDialog').classList.add('open');
 }
 function hideCtrlDialog(){
-  pendingRequesterId=null;
-  document.getElementById('ctrl-overlay').style.display='none';
-  document.getElementById('ctrl-dialog').style.display='none';
+  pendingRequesterId = null;
+  $('ctrlOverlay').classList.remove('open');
+  $('ctrlDialog').classList.remove('open');
 }
 async function respondControl(approve){
-  if(!pendingRequesterId){hideCtrlDialog();return}
-  let r=await fetch(tk(B+'/respond-control'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({clientId:CID,requesterId:pendingRequesterId,approve})});
+  if (!pendingRequesterId){ hideCtrlDialog(); return; }
+  try{
+    const r = await fetch(tk(B + '/respond-control'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId:CID, requesterId:pendingRequesterId, approve }) });
+    if (!r.ok) toast('响应失败', 'err');
+  }catch(_){ toast('响应失败：网络错误', 'err'); }
   hideCtrlDialog();
-  if(!r.ok)toast('响应失败');
 }
 
-// ---- 更新控制端 UI ----
+// ============================ 控制端 UI ============================
 function updateCtrlUI(controllerId){
-  let wasController=isController;
-  isController=(controllerId===CID);
-  if(conn){
-    let label=ps.value||'串口';
-    st.textContent=label+(isController?' [控制端]':' [监视端]');
-    if(isController){st.style.color='#4a4';}else{st.style.color='#888';}
-    reqBtn.style.display=isController?'none':'inline-block';
-    forceBtn.style.display=isController?'none':'inline-block';
-    if(!wasController&&isController)toast('已获得控制权');
-    if(wasController&&!isController)toast('已失去控制权');
+  const wasController = isController;
+  isController = (controllerId === CID);
+  const who = controllerId ? (controllerId === CID ? '本机（你）' : controllerId.slice(0, 8)) : '无';
+  $('ctrlWho').textContent = who;
+  if (conn){
+    const label = (statusCache && statusCache.port) || $('ps').value || '串口';
+    const rate = (statusCache && statusCache.baudRate) || $('bs').value || '';
+    setBadge(isController ? 'ok' : 'warn',
+      label + (rate ? ' · ' + rate : '') + (isController ? ' · 控制端' : ' · 监视端'),
+      isController ? '本机持有控制权，可直接发送数据' : '监视模式：只读，发送前需申请或强制接管控制权');
+    $('ctrlSec').hidden = isController;
+    const cbBtn = $('cb');
+    cbBtn.title = isController ? '断开串口（会释放端口）' : '监视端：断开需要先申请或强制接管控制权';
+    if (!wasController && isController) toast('已获得控制权', 'ok');
+    if (wasController && !isController) toast('已失去控制权', 'warn');
   }
 }
 
-// ---- SSE 连接 ----
+// ============================ 状态渲染 ============================
+function renderStatus(s){
+  statusCache = s;
+  if (s.port){
+    // 端口下拉里没有该端口时补一项（例如启动时自动连接的端口不在当前列表）
+    if (![...$('ps').options].some(o => o.value === s.port)){
+      const o = document.createElement('option'); o.value = s.port; o.textContent = s.port;
+      $('ps').appendChild(o);
+    }
+    $('ps').value = s.port;
+  }
+  if (s.baudRate){
+    const v = String(s.baudRate);
+    if (![...$('bs').options].some(o => o.value === v)){
+      const o = document.createElement('option'); o.value = v; o.textContent = v;
+      $('bs').appendChild(o);
+    }
+    $('bs').value = v;
+  }
+  const stats = s.stats || {};
+  const total = stats.totalBytes || 0, max = stats.bufferMaxSize || 1;
+  $('stRecv').textContent = fmtBytes(total);
+  $('stBuf').textContent = fmtBytes(total) + ' / ' + fmtBytes(max);
+  $('bufFill').style.width = Math.min(100, total / max * 100).toFixed(1) + '%';
+  $('stChunks').textContent = String(stats.chunkCount || 0);
+  $('stUp').textContent = fmtDur(s.uptimeMs || 0);
+  $('stClients').textContent = String(s.clientCount || 0);
+}
+async function refreshStatus(){
+  if (document.hidden) return;
+  try{
+    const r = await fetch(tk(B + '/status'));
+    if (!r.ok) return;
+    const s = await r.json();
+    renderStatus(s);
+    if (s.connected){
+      setBadge(isController ? 'ok' : 'warn',
+        (s.port || '串口') + ' · ' + (s.baudRate || '') + (isController ? ' · 控制端' : ' · 监视端'));
+    }
+  }catch(_){}
+}
+
+// ============================ SSE 事件通道 ============================
 function connectSSE(){
-  if(evtSrc){evtSrc.close();evtSrc=null}
-  let name=navigator.userAgent.slice(0,30).replace(/\s+/g,' ');
-  evtSrc=new EventSource(tk(B+'/events?clientId='+encodeURIComponent(CID)+'&name='+encodeURIComponent(name)));
-  evtSrc.addEventListener('status',e=>{
+  if (evtSrc){ evtSrc.close(); evtSrc = null; }
+  setDot('dotSse', 'warn', '事件通道（SSE）连接中…');
+  const name = navigator.userAgent.slice(0, 30).replace(/\s+/g, ' ');
+  evtSrc = new EventSource(tk(B + '/events?clientId=' + encodeURIComponent(CID) + '&name=' + encodeURIComponent(name)));
+  evtSrc.onopen = () => setDot('dotSse', 'ok', '事件通道（SSE）已连接');
+  evtSrc.addEventListener('status', e => {
     try{
-      let s=JSON.parse(e.data);
-      if(s.connected){
-        if(!conn){
-          conn=true;cb.textContent='断开';cb.style.background='#300';
-          ps.value=s.port||'';bs.value=String(s.baudRate||115200);
+      const s = JSON.parse(e.data);
+      renderStatus(s);
+      if (s.connected){
+        if (!conn){
+          conn = true;
+          $('cb').textContent = '断开'; $('cb').className = 'danger';
+          $('ctrlSec').hidden = false; $('statsSec').hidden = false;
           connectWS();
+          startPolling();
         }
         updateCtrlUI(s.controllerClientId);
       }else{
-        conn=false;cb.textContent='连接';cb.style.background='';
-        st.textContent='未连接';st.style.color='#888';
-        reqBtn.style.display='none';forceBtn.style.display='none';
-        st.textContent='未连接';
+        conn = false;
+        $('cb').textContent = '连接'; $('cb').className = 'primary';
+        setBadge('', '未连接', '串口未打开');
+        $('ctrlSec').hidden = true; $('statsSec').hidden = true;
+        if (ws){ try{ ws.close(); }catch(_){} ws = null; }
+        stopPolling();
       }
     }catch(_){}
   });
-  evtSrc.addEventListener('control-request',e=>{
+  evtSrc.addEventListener('control-request', e => {
     try{
-      let d=JSON.parse(e.data);
-      if(isController)showCtrlDialog(d.requesterId,'');
+      const d = JSON.parse(e.data);
+      if (isController) showCtrlDialog(d.requesterId, '');
     }catch(_){}
   });
-  evtSrc.addEventListener('control-response',e=>{
+  evtSrc.addEventListener('control-response', e => {
     try{
-      let d=JSON.parse(e.data);
-      if(d.approved)toast(d.autoApproved?'控制权已自动获得（超时）':'控制权申请已通过');
-      else toast('控制权申请被拒绝');
+      const d = JSON.parse(e.data);
+      if (d.approved) toast(d.autoApproved ? '控制权已自动获得（原控制端超时）' : '控制权申请已通过', 'ok');
+      else toast('控制权申请被拒绝', 'err');
     }catch(_){}
   });
-  evtSrc.addEventListener('control-taken',e=>{
+  evtSrc.addEventListener('control-taken', e => {
     try{
-      let d=JSON.parse(e.data);
+      const d = JSON.parse(e.data);
       updateCtrlUI(d.newController);
     }catch(_){}
   });
-  evtSrc.onerror=()=>{setTimeout(connectSSE,2000)};
+  evtSrc.onerror = () => {
+    setDot('dotSse', 'err', '事件通道（SSE）断开，2 秒后重连…');
+    setTimeout(connectSSE, 2000);
+  };
 }
 
-// ---- WebSocket ----
+// ============================ WebSocket 终端通道 ============================
 function connectWS(){
-  const oldWs=ws;
-  if(oldWs){try{oldWs.close()}catch(_){}}
-  const newWs=new WebSocket(tk('ws://'+location.host+'/?clientId='+encodeURIComponent(CID)));
-  ws=newWs;
-  ws.binaryType='arraybuffer';
-  ws.onopen=()=>{document.getElementById('wsdb').textContent='WS:已连接 CID:'+CID.slice(0,8)};
-  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer){let b=new Uint8Array(e.data);T.write(b);log+=new TextDecoder().decode(b);if(log.length>1<<20)log=log.slice(-1<<19);}}
-  ws.onclose=()=>{if(ws===newWs){ws=null;}document.getElementById('wsdb').textContent='WS:断开'};
-  ws.onerror=()=>{document.getElementById('wsdb').textContent='WS:错误'};
+  const old = ws;
+  if (old){ try{ old.close(); }catch(_){} }
+  const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const next = new WebSocket(tk(scheme + location.host + '/?clientId=' + encodeURIComponent(CID)));
+  ws = next;
+  next.binaryType = 'arraybuffer';
+  next.onopen = () => setDot('dotWs', 'ok', '终端通道（WebSocket）已连接');
+  next.onmessage = e => {
+    if (e.data instanceof ArrayBuffer){
+      const b = new Uint8Array(e.data);
+      T.write(b);
+      log += new TextDecoder().decode(b);
+      if (log.length > 1 << 20) log = log.slice(-(1 << 19));
+    }
+  };
+  next.onclose = () => {
+    if (ws === next) ws = null;
+    setDot('dotWs', 'err', '终端通道已断开');
+    if (conn && !wsRetry) wsRetry = setTimeout(() => { wsRetry = null; if (conn) connectWS(); }, 1500);
+  };
+  next.onerror = () => setDot('dotWs', 'err', '终端通道错误');
 }
 
-T.onData(data=>{if(ws&&ws.readyState===WebSocket.OPEN){ws.send(data);document.getElementById('wsdb').style.color='#0a0';setTimeout(()=>document.getElementById('wsdb').style.color='#555',300)}});
+// ============================ 状态轮询（统计） ============================
+function startPolling(){
+  stopPolling();
+  pollTimer = setInterval(refreshStatus, 2000);
+}
+function stopPolling(){
+  if (pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+}
 
-// ---- 连接/断开 ----
+// ============================ 连接 / 断开 ============================
 async function tc(){
-  if(conn){await dc();return}
-  let p=ps.value;if(!p)return;
-  let r=await fetch(tk(B+'/connect'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({port:p,baudRate:parseInt(bs.value,10)||115200,clientId:CID})});
-  if(!r.ok){
-    let data=await r.json().catch(()=>({error:'连接失败'}));
-    if(data.error&&data.error.includes('没有控制权限')){
-      toast('没有控制权限，请点击"申请控制"或"强制接管"');
-    }else{
-      st.textContent='连接失败';
+  if (conn){ await dc(); return; }
+  const p = $('ps').value;
+  if (!p){ toast('请先选择串口', 'warn'); return; }
+  const baud = parseInt($('bs').value, 10) || 115200;
+  $('cb').disabled = true;
+  try{
+    const r = await fetch(tk(B + '/connect'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ port:p, baudRate:baud, clientId:CID }) });
+    if (!r.ok){
+      const d = await r.json().catch(() => ({ error:'连接失败' }));
+      if (d.error && d.error.includes('没有控制权限')) toast('没有控制权限，请先「申请控制」或「强制接管」', 'warn', 4000);
+      else toast('连接失败：' + (d.error || r.status), 'err', 4000);
+      return;
     }
-    return;
+    conn = true;
+    $('cb').textContent = '断开'; $('cb').className = 'danger';
+    $('ctrlSec').hidden = false; $('statsSec').hidden = false;
+    setBadge('warn', p + ' · ' + baud + (isController ? ' · 控制端' : ' · 监视端'));
+    connectWS();
+    startPolling();
+    toast('已连接 ' + p + ' @ ' + baud, 'ok');
+  }catch(e){
+    toast('连接失败：' + (e && e.message ? e.message : e), 'err', 4000);
+  }finally{
+    $('cb').disabled = false;
   }
-  conn=true;cb.textContent='断开';cb.style.background='#300';
-  st.textContent=p;connectWS();
 }
 async function dc(){
-  await fetch(tk(B+'/disconnect'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:CID})});
-  if(ws)ws.close();ws=null;
-  conn=false;cb.textContent='连接';cb.style.background='';st.textContent='未连接';
-  st.style.color='#888';reqBtn.style.display='none';forceBtn.style.display='none';
+  // 监视端没有断开权限：服务端会 403。此时【必须什么都不改】，
+  // 否则本地状态会假变成"未连接"，随后被 SSE/轮询翻回来 —— 一次假动作 + 闪一下。
+  if (!isController){
+    toast('监视端不能断开串口，请先「申请控制」或「强制接管」', 'warn', 3600);
+    return;
+  }
+  $('cb').disabled = true;
+  try{
+    const r = await fetch(tk(B + '/disconnect'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId:CID }) });
+    if (!r.ok){
+      const d = await r.json().catch(() => ({}));
+      toast('断开失败：' + (d.error || ('HTTP ' + r.status)), 'err', 4000);
+      return; // 失败 → 保持原状态不动
+    }
+  }catch(e){
+    toast('断开失败：' + (e && e.message ? e.message : '网络错误'), 'err', 4000);
+    return; // 失败 → 保持原状态不动
+  }finally{
+    $('cb').disabled = false;
+  }
+  if (ws){ try{ ws.close(); }catch(_){} ws = null; }
+  conn = false;
+  $('cb').textContent = '连接'; $('cb').className = 'primary';
+  setBadge('', '未连接', '串口未打开');
+  $('ctrlSec').hidden = true; $('statsSec').hidden = true;
+  stopPolling();
+  toast('已断开', 'info', 1600);
 }
 async function rp(){
   try{
-    let r=await fetch(tk(B+'/ports'));
-    if(!r.ok)throw new Error(r.status);
-    let a=await r.json();
-    let cur=ps.value;ps.innerHTML='<option value="">-- 端口 --</option>';
-    a.forEach(p=>{let o=document.createElement('option');o.value=p.path;
-      o.textContent=p.path+(p.manufacturer?' - '+p.manufacturer:'');if(p.path===cur)o.selected=true;ps.appendChild(o)});
+    const r = await fetch(tk(B + '/ports'));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const a = await r.json();
+    const cur = $('ps').value;
+    $('ps').innerHTML = '<option value="">-- 端口 --</option>';
+    a.forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.path;
+      o.textContent = p.path + (p.manufacturer ? ' - ' + p.manufacturer : '');
+      if (p.path === cur) o.selected = true;
+      $('ps').appendChild(o);
+    });
+    if (statusCache && statusCache.port) $('ps').value = statusCache.port;
+    toast('串口列表已刷新（' + a.length + ' 个）', 'info', 1600);
   }catch(e){
-    ps.innerHTML='<option value="">获取失败</option>';
-    T.write('Ports error: '+e.message+'\r\n');
+    $('ps').innerHTML = '<option value="">获取失败</option>';
+    toast('获取串口列表失败：' + (e && e.message ? e.message : e), 'err', 4000);
   }
 }
 
-// ---- 控制权申请/接管 ----
+// ============================ 控制权申请 / 接管 ============================
 async function requestControl(){
-  let r=await fetch(tk(B+'/request-control'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({clientId:CID})});
-  let d=await r.json();
-  toast(d.message||'已发送申请');
+  try{
+    const r = await fetch(tk(B + '/request-control'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId:CID }) });
+    const d = await r.json().catch(() => ({}));
+    toast(d.message || (r.ok ? '已发送申请' : '申请失败'), r.ok ? 'info' : 'err');
+  }catch(_){ toast('申请失败：网络错误', 'err'); }
 }
 async function forceControl(){
-  let r=await fetch(tk(B+'/force-control'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({clientId:CID})});
-  let d=await r.json();
-  if(d.ok)toast('已强制接管控制权');
-  else toast(d.error||'强制接管失败');
+  try{
+    const r = await fetch(tk(B + '/force-control'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId:CID }) });
+    const d = await r.json().catch(() => ({}));
+    if (d.ok) toast('已强制接管控制权', 'ok');
+    else toast(d.error || '强制接管失败', 'err');
+  }catch(_){ toast('强制接管失败：网络错误', 'err'); }
 }
 
-// ---- 初始化 ----
-async function init(){
+// ============================ 清屏 / 复制 / 保存 ============================
+function clearScreen(){
+  if (T) T.clear();
+  log = '';
+  toast('已清屏（服务端缓冲区未动）', 'ok');
+}
+async function copyText(){
+  let s = (T && T.getSelection()) || '';
+  const fromSelection = !!s;
+  if (!s) s = log.slice(-(1 << 15));
+  if (!s){ toast('没有可复制的内容', 'warn'); return; }
+  let ok = false;
+  try{
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(s); ok = true;
+    }
+  }catch(_){ ok = false; }
+  if (!ok){
+    // http 局域网下 clipboard API 不可用，退回 execCommand
+    try{
+      const ta = document.createElement('textarea');
+      ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    }catch(_){ ok = false; }
+  }
+  if (ok) toast((fromSelection ? '已复制选中内容' : '已复制最近输出') + '（' + s.length + ' 字符）', 'ok');
+  else toast('复制失败：浏览器拒绝了剪贴板访问', 'err', 3500);
+}
+function saveText(){
+  if (!log){ toast('没有可保存的内容', 'warn'); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([log], { type:'text/plain' }));
+  a.download = 'serial-' + new Date().toISOString().slice(0, 19).replace(/[:]/g, '-') + '.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('已保存 ' + log.length + ' 字符', 'ok');
+}
+
+// ============================ 发送文件（原始字节 → 串口） ============================
+let sending = false, sendCancelled = false;
+function pickFile(){
+  if (!conn){ toast('请先连接串口', 'warn'); return; }
+  if (!isController){ toast('监视端不能发送数据，请先「申请控制」或「强制接管」', 'warn', 3600); return; }
+  if (sending){ toast('正在发送中，请等待或先取消', 'warn'); return; }
+  $('filePick').click();
+}
+function cancelSend(){
+  if (!sending) return;
+  sendCancelled = true;
+}
+function renderFileProgress(file, sent, t0){
+  const pct = file.size ? (sent / file.size * 100) : 100;
+  const dt = Math.max((Date.now() - t0) / 1000, 1e-3);
+  $('fileProgName').textContent = file.name;
+  $('fileProgPct').textContent = pct.toFixed(pct >= 99.95 ? 0 : 1) + '%';
+  $('fileFill').style.width = Math.min(100, pct).toFixed(1) + '%';
+  $('fileProgText').textContent = fmtBytes(sent) + ' / ' + fmtBytes(file.size);
+  $('fileRate').textContent = Math.round(sent / dt) + ' B/s';
+}
+async function doSendFile(file){
+  const chunkKB = Math.max(1, Math.min(1024, Number($('chunkKB').value) || 16));
+  const chunkSize = chunkKB * 1024;
+  const chunkDelayMs = Math.max(0, Math.min(5000, Number($('chunkDelay').value) || 0));
+  sending = true; sendCancelled = false;
+  $('sendFileBtn').disabled = true;
+  $('fileProg').hidden = false;
+  const t0 = Date.now();
+  let sent = 0;
+  try{
+    while (sent < file.size){
+      if (sendCancelled){
+        toast('已取消：' + file.name + ' 已发送 ' + fmtBytes(sent), 'warn', 4000);
+        return;
+      }
+      const slice = file.slice(sent, Math.min(sent + chunkSize, file.size));
+      const buf = await slice.arrayBuffer();
+      const r = await fetch(tk(B + '/send-file?clientId=' + encodeURIComponent(CID)),
+        { method:'POST', headers:{ 'Content-Type':'application/octet-stream' }, body: buf });
+      if (!r.ok){
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || ('HTTP ' + r.status));
+      }
+      sent += buf.byteLength;
+      renderFileProgress(file, sent, t0);
+      if (chunkDelayMs > 0 && sent < file.size) await new Promise(res => setTimeout(res, chunkDelayMs));
+    }
+    const dt = (Date.now() - t0) / 1000;
+    const rate = Math.round(sent / Math.max(dt, 1e-3));
+    toast('已发送 ' + file.name + '：' + sent + ' 字节，用时 ' + dt.toFixed(2) + ' s（' + rate + ' B/s）', 'ok', 5000);
+  }catch(e){
+    toast('发送失败（已发 ' + fmtBytes(sent) + '）：' + (e && e.message ? e.message : e), 'err', 6000);
+  }finally{
+    sending = false;
+    $('sendFileBtn').disabled = false;
+    setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 4000);
+  }
+}
+$('filePick').addEventListener('change', async () => {
+  const f = $('filePick').files && $('filePick').files[0];
+  $('filePick').value = '';
+  if (f) await doSendFile(f);
+});
+
+// ============================ 滚动到底部 ============================
+function updateBottomBtn(){
+  if (!T) return;
+  const b = T.buffer.active;
+  $('tobottom').style.display = (b.viewportY < b.baseY - 1) ? 'inline-block' : 'none';
+}
+function scrollBottom(){
+  if (!T) return;
+  T.scrollToBottom();
+  updateBottomBtn();
+}
+
+// ============================ 波特率自定义 ============================
+$('bs').addEventListener('change', () => {
+  if ($('bs').value !== 'custom') return;
+  const cur = (statusCache && statusCache.baudRate) || 115200;
+  const v = prompt('自定义波特率（数字）', String(cur));
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0){
+    const s = String(Math.floor(n));
+    if (![...$('bs').options].some(o => o.value === s)){
+      const o = document.createElement('option'); o.value = s; o.textContent = s;
+      $('bs').insertBefore(o, $('bs').querySelector('[value="custom"]'));
+    }
+    $('bs').value = s;
+  }else{
+    $('bs').value = String(cur);
+  }
+});
+
+// ============================ 启动 ============================
+function loadScript(src){
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('load failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+async function ensureXterm(){
+  if (window.Terminal) return;
+  try{
+    await loadScript('/vendor/xterm.js');
+  }catch(_){
+    await loadScript('https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js');
+  }
+}
+async function boot(){
+  await ensureXterm();
+  T = new Terminal({
+    fontSize: fontSize,
+    fontFamily: 'Consolas,Monaco,"Cascadia Mono",monospace',
+    cursorBlink: true,
+    scrollback: 5000,
+    theme: { background: THEMES[themeKey].bg, foreground: THEMES[themeKey].fg,
+      cursor: THEMES[themeKey].cursor, selectionBackground: THEMES[themeKey].sel,
+      selectionForeground: '#ffffff' }
+  });
+  T.open($('term'));
+  applyTheme();
+  fit();
+  setTimeout(fit, 80);
+  setTimeout(fit, 400);
+  if (window.ResizeObserver) new ResizeObserver(scheduleFit).observe($('term'));
+
+  // Ctrl + 滚轮缩放
+  T.element.addEventListener('wheel', e => {
+    if (e.ctrlKey){ e.preventDefault(); bumpFont(e.deltaY > 0 ? -1 : 1); }
+  }, { passive: false });
+
+  T.onData(data => {
+    if (ws && ws.readyState === WebSocket.OPEN){
+      ws.send(data);
+      const d = $('dotWs');
+      d.classList.add('flash');
+      setTimeout(() => d.classList.remove('flash'), 180);
+    }else if (!isController && conn){
+      const now = Date.now();
+      if (now - lastSendWarn > 4000){
+        lastSendWarn = now;
+        toast('监视端不能发送数据，请先申请或强制接管控制权', 'warn', 2600);
+      }
+    }
+  });
+  T.onScroll(updateBottomBtn);
+  T.focus();
+
   await rp();
   connectSSE();
   try{
-    let r=await fetch(tk(B+'/status'));let s=await r.json();
-    if(s.connected){
-      conn=true;cb.textContent='断开';cb.style.background='#300';
-      ps.value=s.port||'';bs.value=String(s.baudRate||115200);
+    const r = await fetch(tk(B + '/status'));
+    const s = await r.json();
+    renderStatus(s);
+    if (s.connected){
+      conn = true;
+      $('cb').textContent = '断开'; $('cb').className = 'danger';
+      $('ctrlSec').hidden = false; $('statsSec').hidden = false;
       updateCtrlUI(s.controllerClientId);
       connectWS();
+      startPolling();
     }else{
-      T.write('等待连接...\r\n');
+      setBadge('', '未连接', '串口未打开');
+      T.write('等待连接…\r\n');
     }
-  }catch(_){T.write('等待连接...\r\n');}
+  }catch(_){
+    T.write('等待连接…\r\n');
+  }
+  setDot('dotWs', ws ? 'warn' : '', '终端通道（WebSocket）未连接');
 }
-init();
-
-async function copyText(){
-  let s=T.getSelection()||'';
-  if(!s)s=log.slice(-1<<15);
-  try{await navigator.clipboard.writeText(s);}catch(_){}
-}
-function saveText(){
-  let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([log],{type:'text/plain'}));
-  a.download='serial-'+new Date().toISOString().slice(0,19).replace(/[:]/g,'-')+'.txt';a.click();
-}
+boot().catch(e => {
+  document.body.insertAdjacentHTML('afterbegin',
+    '<div style="padding:12px;color:#f85149;font:13px monospace">界面初始化失败：' + (e && e.message ? e.message : e) + '</div>');
+});
 </script>
 </body>
 </html>

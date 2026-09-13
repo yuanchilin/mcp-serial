@@ -2,9 +2,12 @@ import * as http from "http";
 import * as os from "os";
 import { exec } from "child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { WebSocketServer } from "ws";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { SerialMonitor } from "./serial-monitor.js";
 import { getViewerHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
@@ -13,7 +16,7 @@ import type { SendRequestBody, ConnectRequestBody } from "./types.js";
 // ============================================================================
 // MCP Server 工厂类型
 // ============================================================================
-type MCPServerFactory = (monitor: SerialMonitor, version: string) => Server;
+type MCPServerFactory = (monitor: SerialMonitor, version: string) => McpServer;
 
 // ============================================================================
 // 安全 / 健壮性 公共工具
@@ -21,6 +24,9 @@ type MCPServerFactory = (monitor: SerialMonitor, version: string) => Server;
 
 /** 请求体上限：64KB，超限返回 413，防止内存耗尽 DoS */
 const MAX_BODY_BYTES = 64 * 1024;
+
+/** 文件分块上限：1MB（前端默认 16KB/块，这里仅作防御） */
+const MAX_FILE_CHUNK_BYTES = 1024 * 1024;
 
 /** 带 HTTP 状态码的错误，便于统一错误处理 */
 class HttpError extends Error {
@@ -188,6 +194,27 @@ async function parseBody<T>(req: http.IncomingMessage): Promise<T> {
   }
 }
 
+/** 读取原始字节请求体（用于文件传输，二进制安全），超过 limit 抛 HttpError(413) */
+function readRawBytes(req: http.IncomingMessage, limit = MAX_FILE_CHUNK_BYTES): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let aborted = false;
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > limit) {
+        aborted = true;
+        reject(new HttpError(413, `请求体过大（上限 ${Math.round(limit / 1024)}KB）`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => { if (!aborted) resolve(Buffer.concat(chunks)); });
+    req.on("error", (e) => { if (!aborted) reject(e); });
+  });
+}
+
 /** 统一错误响应：HttpError 用其状态码，其余按 500 */
 function sendError(res: http.ServerResponse, err: unknown): void {
   const status = err instanceof HttpError ? err.status : 500;
@@ -201,7 +228,8 @@ function sendError(res: http.ServerResponse, err: unknown): void {
 // ============================================================================
 // SSE MCP 传输会话管理
 // ============================================================================
-const sseTransports = new Map<string, SSEServerTransport>();
+/** MCP Streamable HTTP 会话表：sessionId → transport（v2 已无 legacy SSE 传输） */
+const httpTransports = new Map<string, NodeStreamableHTTPServerTransport>();
 
 // ============================================================================
 // 浏览器打开工具
@@ -324,6 +352,12 @@ export function startWebServer(
       return;
     }
 
+    // POST /send-file — 浏览器上传文件原始字节（二进制安全）
+    if (req.method === "POST" && url.pathname === "/send-file") {
+      handleSendFile(req, res, monitor, url);
+      return;
+    }
+
     // POST /disconnect — Web 终端断开串口
     if (req.method === "POST" && url.pathname === "/disconnect") {
       handleDisconnect(req, res, monitor);
@@ -355,18 +389,28 @@ export function startWebServer(
     }
 
     // ====================================================================
-    // MCP over SSE — 远程 MCP 客户端连接
+    // MCP over Streamable HTTP — 远程 MCP 客户端连接（SDK v2；POST/GET/DELETE 同一端点）
     // ====================================================================
 
-    // GET /mcp/sse — 建立 SSE 连接，启动 MCP Server 实例
-    if (url.pathname === "/mcp/sse") {
-      handleMCPSse(req, res, monitor, mcpServerFactory, appVersion);
+    // /mcp — Streamable HTTP：POST 发消息、GET 收流、DELETE 结束会话
+    if (url.pathname === "/mcp" || url.pathname === "/mcp/") {
+      handleMCPHttp(req, res, monitor, mcpServerFactory, appVersion).catch((err: Error) => {
+        console.error("[MCP-HTTP] error:", err);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
       return;
     }
 
-    // POST /mcp/message — 接收 MCP 客户端消息
-    if (req.method === "POST" && url.pathname === "/mcp/message") {
-      handleMCPMessage(req, res, url);
+    // 旧 legacy SSE 端点：已随 SDK v2 移除，给出明确迁移提示（而不是静默 404）
+    if (url.pathname === "/mcp/sse" || url.pathname === "/mcp/message") {
+      res.writeHead(410, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        error: "legacy HTTP+SSE 传输已移除（SDK v2 起改由 Streamable HTTP 提供）",
+        use: `http://${host}/mcp`,
+      }));
       return;
     }
 
@@ -380,6 +424,12 @@ export function startWebServer(
     if (url.pathname === "/status") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(monitor.getStatus()));
+      return;
+    }
+
+    // GET /vendor/xterm.js|css — 本地前端资源（离线可用）
+    if (url.pathname.startsWith("/vendor/")) {
+      handleVendorAsset(res, url.pathname.slice("/vendor/".length));
       return;
     }
 
@@ -432,7 +482,7 @@ export function startWebServer(
       console.error(`[WebServer] 提示: 如果局域网其他电脑无法访问，请检查 Windows 防火墙是否放行端口 ${actualPort}`);
     }
     if (mcpServerFactory) {
-      console.error(`[WebServer] MCP over SSE: http://localhost:${actualPort}/mcp/sse`);
+      console.error(`[WebServer] MCP over Streamable HTTP: http://localhost:${actualPort}/mcp`);
     }
     onStarted?.(actualPort);
     if (autoOpenBrowser) {
@@ -484,6 +534,70 @@ async function handleGetPorts(
     const ports = await SerialPort.list();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(ports));
+  } catch (err) {
+    sendError(res, err);
+  }
+}
+
+/** GET /vendor/* — 本地 xterm 资源（离线可用；缺失时前端自动回退 CDN） */
+function handleVendorAsset(res: http.ServerResponse, name: string): void {
+  // 白名单：只允许这两个文件，避免变成任意文件读取
+  const Targets: Record<string, { mime: string; paths: string[] }> = {
+    "xterm.js": { mime: "application/javascript; charset=utf-8", paths: ["lib/xterm.js"] },
+    "xterm.css": { mime: "text/css; charset=utf-8", paths: ["css/xterm.css"] },
+  };
+  const target = Targets[name];
+  if (!target) {
+    res.writeHead(404);
+    res.end("Not Found");
+    return;
+  }
+  const Here = dirname(fileURLToPath(import.meta.url));
+  // 优先取构建产物 build/vendor/，其次取 node_modules 里的 @xterm/xterm（开发态）
+  const Candidates = [
+    join(Here, "vendor", name),
+    ...target.paths.map((p) => join(Here, "..", "node_modules", "@xterm", "xterm", p)),
+  ];
+  for (const File of Candidates) {
+    if (!existsSync(File)) continue;
+    try {
+      const Data = readFileSync(File);
+      res.writeHead(200, {
+        "Content-Type": target.mime,
+        "Content-Length": Data.length,
+        "Cache-Control": "public, max-age=86400",
+      });
+      res.end(Data);
+      return;
+    } catch {
+      /* 继续尝试下一个候选路径 */
+    }
+  }
+  res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("xterm asset not found");
+}
+
+/** POST /send-file?clientId=xxx — 把请求体原始字节写入串口（二进制安全，不追加行尾、不等响应）
+ *  前端按块上传（默认 16KB/块），避免超大请求体；仅控制端可用。 */
+async function handleSendFile(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  monitor: SerialMonitor,
+  url: URL
+): Promise<void> {
+  try {
+    const clientId = url.searchParams.get("clientId") || "";
+    // 权限前置：非控制端直接拒绝（不注册幽灵客户端，也不产生副作用）
+    const permErr = checkController(monitor, clientId);
+    if (permErr) throw new HttpError(403, permErr);
+    // 体量上限要在串口状态之前判定，否则超大块永远拿不到 413
+    const Data = await readRawBytes(req);
+    if (Data.length === 0) throw new HttpError(400, "空请求体");
+    if (!monitor.isActive()) throw new HttpError(500, "串口未打开");
+    monitor.touchClient(clientId);
+    await monitor.writeBuffer(Data);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, sent: Data.length }));
   } catch (err) {
     sendError(res, err);
   }
@@ -797,52 +911,64 @@ function handleSSE(
 }
 
 // ============================================================================
-// MCP over SSE — 处理函数
+// MCP over Streamable HTTP — 处理函数（SDK v2）
 // ============================================================================
 
-/** GET /mcp/sse — 建立 SSE 连接，创建 MCP Server 实例 */
-function handleMCPSse(
+/**
+ * /mcp — MCP Streamable HTTP 端点。
+ * 有状态模式：首个请求（POST initialize）新建 transport + server 实例，
+ * 服务端在响应头回 `mcp-session-id`，后续 GET（收流）/ POST（发消息）/ DELETE（结束）凭该 id 复用。
+ */
+async function handleMCPHttp(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   monitor: SerialMonitor,
   factory?: MCPServerFactory,
   version?: string
-): void {
+): Promise<void> {
   if (!factory) {
-    res.writeHead(404, { "Content-Type": "text/plain" });
-    res.end("MCP over SSE not available");
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("MCP over HTTP not available");
     return;
   }
 
-  const transport = new SSEServerTransport("/mcp/message", res);
-  const server = factory(monitor, version || "2.3.0");
+  const rawHeader = req.headers["mcp-session-id"];
+  const sessionId = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+
+  // ① 已有会话：复用同一个 transport（GET 收流 / POST 发消息 / DELETE 结束）
+  if (sessionId) {
+    const existing = httpTransports.get(sessionId);
+    if (!existing) {
+      res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "未知会话：mcp-session-id 无效或已过期，请重新 initialize" }));
+      return;
+    }
+    await existing.handleRequest(req, res);
+    return;
+  }
+
+  // ② 无会话：只有 POST（首次 initialize）可以开新会话
+  if (req.method !== "POST") {
+    res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "缺少 mcp-session-id：新会话请用 POST 发送 initialize" }));
+    return;
+  }
+
+  const transport = new NodeStreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
+  const server = factory(monitor, version || "0.0.0");
 
   transport.onclose = () => {
-    sseTransports.delete(transport.sessionId);
+    const sid = transport.sessionId;
+    if (sid) httpTransports.delete(sid);
     server.close().catch(() => {});
   };
 
-  sseTransports.set(transport.sessionId, transport);
-  server.connect(transport).catch((err: Error) => {
-    console.error("[MCP-SSE] connect error:", err);
-  });
-}
+  await server.connect(transport);
+  await transport.handleRequest(req, res);
 
-/** POST /mcp/message — 接收 MCP 客户端消息并路由到对应会话 */
-function handleMCPMessage(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  url: URL
-): void {
-  const sessionId = url.searchParams.get("sessionId");
-  if (!sessionId || !sseTransports.has(sessionId)) {
-    res.writeHead(404, { "Content-Type": "text/plain" });
-    res.end("Session not found");
-    return;
-  }
-
-  const transport = sseTransports.get(sessionId)!;
-  transport.handlePostMessage(req, res).catch((err: Error) => {
-    console.error("[MCP-SSE] handlePostMessage error:", err);
-  });
+  // sessionId 在 initialize 处理过程中生成，响应发出后即可登记
+  const sid = transport.sessionId;
+  if (sid) httpTransports.set(sid, transport);
 }

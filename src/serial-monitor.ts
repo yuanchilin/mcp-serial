@@ -344,10 +344,31 @@ export class SerialMonitor {
     });
   }
 
+  /**
+   * 流式写入**原始字节**（不追加行尾、不等待响应）。
+   * 与 write(string) 的区别：string 会按 UTF-8 编码，二进制镜像（字节 >0x7F）会被改写；
+   * 这个重载直接吃 Buffer，用于把固件/HEX/SREC 等整份文件推给板子。
+   */
+  async writeBuffer(data: Buffer): Promise<void> {
+    if (!this.serialPort || !this.serialPort.isOpen) {
+      throw new Error("串口未打开");
+    }
+
+    return new Promise((resolve, reject) => {
+      this.serialPort!.write(data, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
   // ---- WebSocket 客户端管理 ----
 
   addWSClient(ws: WebSocket, name: string, clientId?: string): void {
     this.wsClients.add({ ws, name, clientId });
+    // 回放：把缓冲区里已有的历史数据补发给这个新连接。
+    // 否则新打开的页面只能看到"连接之后"才到的数据 —— 缓冲里明明有内容，终端却是空的。
+    this.replayBufferTo(ws);
     ws.on("message", (data: Buffer) => {
       if (this.serialPort && this.serialPort.isOpen) {
         // 有 clientId 的 WS 连接需要校验控制权，非控制端忽略
@@ -363,6 +384,15 @@ export class SerialMonitor {
     ws.on("error", () => {
       for (const c of this.wsClients) { if (c.ws === ws) { this.wsClients.delete(c); break; } }
     });
+  }
+
+  /** 把当前环形缓冲内容补发给单个 WS 客户端（按 UTF-8 还原为原始字节，不广播给其他人） */
+  replayBufferTo(ws: WebSocket): void {
+    const history = this.buffer.getAll();
+    if (!history) return;
+    try {
+      ws.send(Buffer.from(history, "utf-8"));
+    } catch { /* 连接已失效，忽略 */ }
   }
 
   broadcastWS(data: Buffer): void {

@@ -11,7 +11,7 @@
     "build"
   ],
   "scripts": {
-    "build": "tsc && node -e \"fs.chmodSync('build/index.js', 0o755); fs.cpSync('src/viewer.html', 'build/viewer.html')\"",
+    "build": "tsc && node -e \"const fs=require('fs');fs.chmodSync('build/index.js',0o755);fs.mkdirSync('build/vendor',{recursive:true});for(const [s,d] of [['node_modules/@xterm/xterm/lib/xterm.js','build/vendor/xterm.js'],['node_modules/@xterm/xterm/css/xterm.css','build/vendor/xterm.css']]){if(fs.existsSync(s))fs.copyFileSync(s,d)};fs.cpSync('src/viewer.html','build/viewer.html')\"",
     "start": "node build/index.js",
     "prepare": "npm run build",
     "pretest": "npm run build",
@@ -20,13 +20,16 @@
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "serialport": "^13.0.0",
-    "ws": "^8.21.1"
+    "ws": "^8.21.1",
+    "zod": "^4.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
     "@types/ws": "^8.18.1",
+    "@xterm/xterm": "^5.5.0",
     "typescript": "^5.3.3"
   },
   "repository": {
