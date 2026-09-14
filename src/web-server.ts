@@ -9,6 +9,7 @@ import { WebSocketServer } from "ws";
 import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { SerialMonitor } from "./serial-monitor.js";
+import { PortRegistry, type Audience } from "./port-registry.js";
 import { getViewerHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
 import type { SendRequestBody, ConnectRequestBody } from "./types.js";
@@ -16,7 +17,7 @@ import type { SendRequestBody, ConnectRequestBody } from "./types.js";
 // ============================================================================
 // MCP Server 工厂类型
 // ============================================================================
-type MCPServerFactory = (monitor: SerialMonitor, version: string) => McpServer;
+type MCPServerFactory = (registry: PortRegistry, version: string, opts: { audience: Audience }) => McpServer;
 
 // ============================================================================
 // 安全 / 健壮性 公共工具
@@ -80,6 +81,25 @@ export function setWebPassword(p: string): void {
 function isLocal(req: http.IncomingMessage): boolean {
   const addr = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
   return addr === "127.0.0.1" || addr === "::1" || addr === "localhost";
+}
+
+/** 客户端来源地址（去 IPv6 前缀） */
+function clientIp(req: http.IncomingMessage): string {
+  return (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+}
+
+/**
+ * 受众判定：只有【回环来源】算本机（用户决策：局域网 IP 访问一律按远程处理，
+ * 因此"仅本机可见"的开关请在本机用 http://127.0.0.1:PORT 打开）。
+ */
+function audienceOf(req: http.IncomingMessage): Audience {
+  return isLocal(req) ? "local" : "remote";
+}
+
+/** 对远程客户端，私有端口一律按"不存在"处理（404，不泄露存在性） */
+function notFoundInvisible(res: http.ServerResponse): void {
+  res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ error: "Not Found" }));
 }
 
 /** 校验登录会话令牌是否有效 */
@@ -289,8 +309,85 @@ export function getLanIPs(): string[] {
 // 控制权申请管理
 // ============================================================================
 
-/** 待处理的控制权申请: Map<requesterClientId, timeoutId> */
+/** 待处理的控制权申请: Map<"port:clientId", timeoutId>（按端口隔离，多路互不顶掉） */
 const pendingRequests = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** 控制权申请的 key：把端口纳入，避免 A 口的申请被 B 口的响应清掉 */
+function pendingKey(port: string, clientId: string): string {
+  return `${port}:${clientId}`;
+}
+
+/**
+ * HTTP 层统一的寻址：把 "端口" 解析成具体会话。
+ * 失败时直接回 400 + 可读错误（内容与 MCP 工具侧完全一致），并返回 null。
+ */
+function resolveSessionOrFail(
+  registry: PortRegistry,
+  port: unknown,
+  res: http.ServerResponse,
+  audience: Audience = "local"
+): SerialMonitor | null {
+  const wanted = typeof port === "string" ? port.trim() : "";
+  // 远程访问私有端口：按"不存在"处理，不泄露任何信息（连错误文案都不给）
+  if (audience === "remote" && wanted && registry.isPrivate(wanted)) {
+    notFoundInvisible(res);
+    return null;
+  }
+  const resolved = registry.resolve(wanted, audience);
+  if (resolved.ok) return resolved.session;
+  res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ error: resolved.error, openPorts: registry.openPortNames(audience) }));
+  return null;
+}
+
+/** GET /status — 指定端口返回详情；省略时"恰好一路"仍返回扁平结构（兼容旧 UI），否则返回多路摘要 */
+function handleStatus(res: http.ServerResponse, registry: PortRegistry, url: URL, audience: Audience): void {
+  const wanted = (url.searchParams.get("port") || "").trim();
+  if (wanted) {
+    if (audience === "remote" && registry.isPrivate(wanted)) {
+      notFoundInvisible(res);
+      return;
+    }
+    const session = registry.get(wanted, audience);
+    if (!session || !session.isActive()) {
+      res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: `串口 ${wanted} 未在运行中`, openPorts: registry.openPortNames(audience) }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ...session.getStatus(),
+      openPorts: registry.openPortNames(audience),
+      audience,
+      private: registry.isPrivate(session.port),
+    }));
+    return;
+  }
+
+  const sessions = registry.openSessions(audience);
+  if (sessions.length === 1) {
+    // 向后兼容：单路时保持旧的扁平结构（旧 UI 直接读 connected/port/baudRate…）
+    const s = sessions[0];
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ...s.getStatus(),
+      openPorts: registry.openPortNames(audience),
+      audience,
+      private: registry.isPrivate(s.port),
+    }));
+    return;
+  }
+
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    connected: false,
+    multi: sessions.length > 1,
+    openPorts: registry.openPortNames(audience),
+    audience,
+    // 每路附带 private 标记（远程只会拿到可见端口，故不泄露）
+    ports: sessions.map((s) => ({ ...s.getStatus(), private: registry.isPrivate(s.port) })),
+  }));
+}
 
 // ============================================================================
 // Web 监视器服务器
@@ -298,7 +395,7 @@ const pendingRequests = new Map<string, ReturnType<typeof setTimeout>>();
 
 export function startWebServer(
   port: number,
-  monitor: SerialMonitor,
+  registry: PortRegistry,
   autoOpenBrowser: boolean = false,
   mcpServerFactory?: MCPServerFactory,
   appVersion?: string,
@@ -320,6 +417,8 @@ export function startWebServer(
 
     const host = req.headers.host || `localhost:${port}`;
     const url = new URL(req.url || "/", `http://${host}`);
+    // 受众：只有回环来源算本机；远程受众看不到（也操作不了）私有端口
+    const audience = audienceOf(req);
 
     // POST /api/login — 远程登录（密码比对，成功发会话令牌）[免认证]
     if (req.method === "POST" && url.pathname === "/api/login") {
@@ -340,51 +439,68 @@ export function startWebServer(
       return;
     }
 
+    // ---- 端口可见性（仅本机客户端可管理；远程一律 404）----
+    if (url.pathname === "/privacy") {
+      if (audience === "remote") {
+        notFoundInvisible(res);
+        return;
+      }
+      if (req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ private: registry.listPrivate(), audience }));
+        return;
+      }
+      if (req.method === "POST") {
+        handleSetPrivacy(req, res, registry);
+        return;
+      }
+    }
+
     // POST /send — Web 终端发送命令
     if (req.method === "POST" && url.pathname === "/send") {
-      handleSend(req, res, monitor);
+      handleSend(req, res, registry, url, audience);
       return;
     }
 
     // POST /connect — Web 终端连接串口
     if (req.method === "POST" && url.pathname === "/connect") {
-      handleConnect(req, res, monitor);
+      handleConnect(req, res, registry, audience);
       return;
     }
 
     // POST /send-file — 浏览器上传文件原始字节（二进制安全）
     if (req.method === "POST" && url.pathname === "/send-file") {
-      handleSendFile(req, res, monitor, url);
+      handleSendFile(req, res, registry, url, audience);
       return;
     }
 
-    // POST /disconnect — Web 终端断开串口
+    // POST /disconnect — Web 终端断开串口（必须指定 port；全关必须显式 all:true）
     if (req.method === "POST" && url.pathname === "/disconnect") {
-      handleDisconnect(req, res, monitor);
+      handleDisconnect(req, res, registry, audience);
       return;
     }
 
     // POST /request-control — 申请控制权
     if (req.method === "POST" && url.pathname === "/request-control") {
-      handleRequestControl(req, res, monitor);
+      handleRequestControl(req, res, registry, audience);
       return;
     }
 
     // POST /respond-control — 响应控制权申请
     if (req.method === "POST" && url.pathname === "/respond-control") {
-      handleRespondControl(req, res, monitor);
+      handleRespondControl(req, res, registry, audience);
       return;
     }
 
     // POST /force-control — 强制接管控制权
     if (req.method === "POST" && url.pathname === "/force-control") {
-      handleForceControl(req, res, monitor);
+      handleForceControl(req, res, registry, audience);
       return;
     }
 
-    // GET /events — SSE 实时数据流
+    // GET /events — SSE 实时数据流（按端口订阅：?port=COM3；多路时必填）
     if (url.pathname === "/events") {
-      handleSSE(req, res, monitor, url);
+      handleSSE(req, res, registry, url, audience);
       return;
     }
 
@@ -394,7 +510,7 @@ export function startWebServer(
 
     // /mcp — Streamable HTTP：POST 发消息、GET 收流、DELETE 结束会话
     if (url.pathname === "/mcp" || url.pathname === "/mcp/") {
-      handleMCPHttp(req, res, monitor, mcpServerFactory, appVersion).catch((err: Error) => {
+      handleMCPHttp(req, res, registry, mcpServerFactory, appVersion, audience).catch((err: Error) => {
         console.error("[MCP-HTTP] error:", err);
         if (!res.headersSent) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -414,16 +530,15 @@ export function startWebServer(
       return;
     }
 
-    // GET /ports — 列出可用串口
+    // GET /ports — 列出可用串口（标注哪些已被本服务打开；远程看不到私有端口）
     if (url.pathname === "/ports") {
-      handleGetPorts(req, res);
+      handleGetPorts(req, res, registry, audience);
       return;
     }
 
-    // GET /status — 获取串口状态
+    // GET /status — 串口状态（?port= 指定；省略时单路返回扁平结构，多路返回摘要）
     if (url.pathname === "/status") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(monitor.getStatus()));
+      handleStatus(res, registry, url, audience);
       return;
     }
 
@@ -463,7 +578,26 @@ export function startWebServer(
     }
     const name = (req.headers["user-agent"] || "ws").slice(0, 20);
     const clientId = wsUrl.searchParams.get("clientId") || undefined;
-    monitor.addWSClient(ws, name, clientId);
+    const wsAudience = audienceOf(req);
+    const wsIp = clientIp(req);
+    const wantedPort = (wsUrl.searchParams.get("port") || "").trim();
+    // 远程受众：私有端口一律不挂载（连存在性都不确认）
+    if (wsAudience === "remote" && wantedPort && registry.isPrivate(wantedPort)) {
+      console.error(`[WebServer] WS 拒绝连接: ${wantedPort} 对远程不可见`);
+      try { ws.close(1008, "not found"); } catch { /* 忽略 */ }
+      return;
+    }
+    // 按端口挂载：多路且未指定 port 时拒绝连接，避免把 A 口数据推给在看 B 口的人
+    const resolved = registry.resolve(wantedPort, wsAudience);
+    if (!resolved.ok) {
+      console.error(`[WebServer] WS 拒绝连接: ${resolved.error}`);
+      try { ws.close(1008, "port required"); } catch { /* 忽略 */ }
+      return;
+    }
+    resolved.session.addWSClient(ws, name, clientId, wsIp, {
+      // 历史回放按需：只有显式 ?replay=1 才补发缓冲（新窗口默认空终端）
+      replay: wsUrl.searchParams.get("replay") === "1",
+    });
   });
 
   // 端口自动回退：配置端口被占用时递增尝试（最多额外 10 个），实际端口由 listening 回调获取
@@ -528,12 +662,23 @@ function checkController(monitor: SerialMonitor, clientId: unknown): string | nu
 /** GET /ports */
 async function handleGetPorts(
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
     const ports = await SerialPort.list();
+    const annotated = ports
+      // 远程受众：私有端口连"设备存在"都不暴露
+      .filter((p) => registry.visible(p.path, audience))
+      .map((p) => {
+        const session = registry.get(p.path, audience);
+        const active = !!session && session.isActive();
+        return { ...p, open: active, baudRate: active ? session!.getStatus().baudRate : undefined };
+      });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(ports));
+    // 保持"裸数组"结构（旧 UI 直接 forEach）；open/baudRate 是纯增量字段
+    res.end(JSON.stringify(annotated));
   } catch (err) {
     sendError(res, err);
   }
@@ -582,22 +727,25 @@ function handleVendorAsset(res: http.ServerResponse, name: string): void {
 async function handleSendFile(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor,
-  url: URL
+  registry: PortRegistry,
+  url: URL,
+  audience: Audience
 ): Promise<void> {
   try {
     const clientId = url.searchParams.get("clientId") || "";
+    // 先按端口寻址（多路时必填 port），再做权限判定
+    const session = resolveSessionOrFail(registry, url.searchParams.get("port"), res, audience);
+    if (!session) return;
     // 权限前置：非控制端直接拒绝（不注册幽灵客户端，也不产生副作用）
-    const permErr = checkController(monitor, clientId);
+    const permErr = checkController(session, clientId);
     if (permErr) throw new HttpError(403, permErr);
     // 体量上限要在串口状态之前判定，否则超大块永远拿不到 413
     const Data = await readRawBytes(req);
     if (Data.length === 0) throw new HttpError(400, "空请求体");
-    if (!monitor.isActive()) throw new HttpError(500, "串口未打开");
-    monitor.touchClient(clientId);
-    await monitor.writeBuffer(Data);
+    session.touchClient(clientId);
+    await session.writeBuffer(Data);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, sent: Data.length }));
+    res.end(JSON.stringify({ ok: true, sent: Data.length, port: session.port }));
   } catch (err) {
     sendError(res, err);
   }
@@ -607,55 +755,106 @@ async function handleSendFile(
 async function handleConnect(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
     const body = await parseBody<ConnectRequestBody & { clientId?: string }>(req);
-    // 串口未连接时，任何人都可以连接；已连接时只有控制端可以断开并重连
-    if (monitor.isActive()) {
-      const permErr = checkController(monitor, body.clientId);
+    if (!body.port || typeof body.port !== "string") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "缺少 port 参数" }));
+      return;
+    }
+    // 远程受众：私有端口按"不存在"处理
+    if (audience === "remote" && registry.isPrivate(body.port)) {
+      notFoundInvisible(res);
+      return;
+    }
+    // 该路已经打开时，只有【该路】的控制端可以重连（不影响其他端口）
+    const existing = registry.get(body.port, audience);
+    if (existing && existing.isActive()) {
+      const permErr = checkController(existing, body.clientId);
       if (permErr) {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: permErr }));
         return;
       }
     }
-    if (!body.port || typeof body.port !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "缺少 port 参数" }));
-      return;
-    }
     const br = typeof body.baudRate === "number" && body.baudRate > 0 ? body.baudRate : 115200;
-    await monitor.start(body.port, br);
+    const session = await registry.open(body.port, br);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, ...monitor.getStatus() }));
+    res.end(JSON.stringify({ ok: true, ...session.getStatus(), openPorts: registry.openPortNames() }));
   } catch (err) {
     sendError(res, err);
   }
 }
 
-/** POST /disconnect */
+/** POST /disconnect — 必须指定 port；要全关必须显式 all:true */
 async function handleDisconnect(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
-    const body = await parseBody<{ clientId?: string }>(req);
-    // 无控制端(自动连接)或本人是控制端 → 允许断开
-    if (monitor.controllerClientId && monitor.controllerClientId !== body.clientId) {
-      res.writeHead(403, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "无权限: 需要控制端权限" }));
+    const body = await parseBody<{ clientId?: string; port?: string; all?: boolean }>(req);
+    const plan = registry.planStop(body.port, body.all, audience);
+    if (!plan.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: plan.error, openPorts: registry.openPortNames(audience) }));
       return;
     }
-    if (!monitor.isActive()) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, message: "串口未在运行中" }));
-      return;
+    // 权限：逐端口判定（该路没有控制端时允许，保持与旧行为一致）
+    for (const name of plan.ports) {
+      const session = registry.get(name, audience);
+      if (session && session.controllerClientId && session.controllerClientId !== body.clientId) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `无权限: 需要 ${name} 的控制端权限`, port: name }));
+        return;
+      }
     }
-    await monitor.stop();
+    const closed: string[] = [];
+    for (const name of plan.ports) {
+      await registry.close(name);
+      closed.push(name);
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ ok: true, closed, openPorts: registry.openPortNames() }));
+  } catch (err) {
+    sendError(res, err);
+  }
+}
+
+/** POST /privacy { port, private } — 仅本机可管理；切成私有时立刻踢掉该端口的远程连接 */
+async function handleSetPrivacy(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  registry: PortRegistry
+): Promise<void> {
+  try {
+    const body = await parseBody<{ port?: string; private?: boolean; clientId?: string }>(req);
+    const port = (body.port || "").trim();
+    if (!port) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "缺少 port 参数" }));
+      return;
+    }
+    const session = registry.get(port); // 本机受众
+    // 权限：端口正在运行时，必须是【它当前的控制端】—— 本机监视端也不得改可见性
+    if (session && session.isActive()) {
+      const permErr = checkController(session, body.clientId);
+      if (permErr) {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: `需要 ${port} 的本机控制权（${permErr}）`, port }));
+        return;
+      }
+    }
+    const wantPrivate = body.private === true;
+    registry.setPrivate(port, wantPrivate);
+    // 切成"仅本机可见"时立即断开该端口上已有的远程连接（不能切了还让它们继续收数据）
+    const kicked = wantPrivate && session ? session.disconnectRemoteClients() : 0;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, port, private: wantPrivate, kicked, privatePorts: registry.listPrivate() }));
   } catch (err) {
     sendError(res, err);
   }
@@ -665,38 +864,45 @@ async function handleDisconnect(
 function handleSend(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  url: URL,
+  audience: Audience
 ): void {
   readBodyRaw(req).then(async (body) => {
     try {
-      const raw = JSON.parse(body) as SendRequestBody & { clientId?: string };
+      const raw = JSON.parse(body) as SendRequestBody & { clientId?: string; port?: string };
       const { command, lineEnding, clientId } = raw;
       if (!command || typeof command !== "string") {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "缺少 command 参数" }));
         return;
       }
+      // 端口可来自 body 或查询串；多路时必填（否则 400 并列出候选）
+      const session = resolveSessionOrFail(registry, raw.port ?? url.searchParams.get("port"), res, audience);
+      if (!session) return;
+
       const le = typeof lineEnding === "string" ? lineEnding : "\n";
       // 流式写入 (空行尾) 不需要控制权；完整命令需要控制端权限
       if (le !== "") {
-        monitor.pruneStaleClients();
-        // 全新 clientId 直接 /send：注册并立即接管控制（免先连 SSE 长连接）
-        if (clientId && typeof clientId === "string" && !monitor.isRegistered(clientId)) {
-          monitor.registerClient(clientId);
-          monitor.setController(clientId);
+        session.pruneStaleClients();
+        // 全新 clientId 直接 /send：注册该端口；但**只有在还没有控制端时**才自动接管。
+        // 多串口场景下绝不允许"用新 clientId 静默夺走某一路的控制权"。
+        if (clientId && typeof clientId === "string" && !session.isRegistered(clientId)) {
+          session.registerClient(clientId);
+          if (!session.controllerClientId) session.setController(clientId);
         }
-        if (clientId && typeof clientId === "string") monitor.touchClient(clientId);
-        const permErr = checkController(monitor, clientId);
+        if (clientId && typeof clientId === "string") session.touchClient(clientId);
+        const permErr = checkController(session, clientId);
         if (permErr) {
           res.writeHead(403, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: permErr }));
+          res.end(JSON.stringify({ error: permErr, port: session.port }));
           return;
         }
       }
       // /send 仅负责原始写入，不等待响应；响应等待使用 MCP serial_send
-      await monitor.sendRaw(command, le);
+      await session.sendRaw(command, le);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, port: session.port }));
     } catch (err) {
       sendError(res, err);
     }
@@ -705,72 +911,79 @@ function handleSend(
   });
 }
 
-/** POST /request-control — 申请控制权 */
+/** POST /request-control — 申请控制权（按端口；多路时需在 body 里带 port） */
 async function handleRequestControl(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
-    const body = await parseBody<{ clientId?: string }>(req);
+    const body = await parseBody<{ clientId?: string; port?: string }>(req);
     const clientId = body.clientId;
     if (!clientId || typeof clientId !== "string") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "缺少 clientId" }));
       return;
     }
-    if (monitor.isController(clientId)) {
+    const session = resolveSessionOrFail(registry, body.port, res, audience);
+    if (!session) return;
+
+    if (session.isController(clientId)) {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, message: "已经是控制端" }));
+      res.end(JSON.stringify({ ok: true, message: `已经是 ${session.port} 的控制端` }));
       return;
     }
-    const controller = monitor.controllerClientId;
+    const controller = session.controllerClientId;
     if (!controller) {
-      // 没有控制端，直接提升
-      monitor.setController(clientId);
+      // 该路没有控制端，直接提升
+      session.setController(clientId);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, message: "已自动成为控制端" }));
+      res.end(JSON.stringify({ ok: true, message: `已自动成为 ${session.port} 的控制端` }));
       return;
     }
 
-    // 清除之前的待处理请求
-    const prevTimeout = pendingRequests.get(clientId);
+    // 清除该端口上这个申请人之前待处理的请求
+    const key = pendingKey(session.port, clientId);
+    const prevTimeout = pendingRequests.get(key);
     if (prevTimeout) clearTimeout(prevTimeout);
 
-    // 向当前控制端发送申请
-    monitor.sendToClient(controller, "control-request", {
+    // 向【该端口】的当前控制端发送申请
+    session.sendToClient(controller, "control-request", {
       requesterId: clientId,
+      port: session.port,
       timestamp: Date.now(),
     });
 
     // 10 秒超时自动同意
     const timeoutId = setTimeout(() => {
-      pendingRequests.delete(clientId);
-      if (monitor.controllerClientId === controller) {
-        monitor.setController(clientId);
-        monitor.sendToClient(clientId, "control-response", {
+      pendingRequests.delete(key);
+      if (session.controllerClientId === controller) {
+        session.setController(clientId);
+        session.sendToClient(clientId, "control-response", {
           approved: true,
           autoApproved: true,
         });
       }
     }, 10000);
-    pendingRequests.set(clientId, timeoutId);
+    pendingRequests.set(key, timeoutId);
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, message: "已发送申请，等待控制端响应（10 秒超时自动同意）" }));
+    res.end(JSON.stringify({ ok: true, port: session.port, message: "已发送申请，等待控制端响应（10 秒超时自动同意）" }));
   } catch (err) {
     sendError(res, err);
   }
 }
 
-/** POST /respond-control — 控制端响应申请 */
+/** POST /respond-control — 控制端响应申请（按端口） */
 async function handleRespondControl(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
-    const body = await parseBody<{ clientId?: string; requesterId?: string; approve?: boolean }>(req);
+    const body = await parseBody<{ clientId?: string; requesterId?: string; approve?: boolean; port?: string }>(req);
     const clientId = body.clientId;
     const requesterId = body.requesterId;
     const approve = body.approve === true;
@@ -780,85 +993,96 @@ async function handleRespondControl(
       res.end(JSON.stringify({ error: "缺少参数" }));
       return;
     }
-    if (!monitor.isController(clientId)) {
+    const session = resolveSessionOrFail(registry, body.port, res, audience);
+    if (!session) return;
+
+    if (!session.isController(clientId)) {
       res.writeHead(403, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "只有控制端可以响应申请" }));
+      res.end(JSON.stringify({ error: `只有 ${session.port} 的控制端可以响应申请` }));
       return;
     }
 
     // 清除超时
-    const timeoutId = pendingRequests.get(requesterId);
+    const key = pendingKey(session.port, requesterId);
+    const timeoutId = pendingRequests.get(key);
     if (timeoutId) {
       clearTimeout(timeoutId);
-      pendingRequests.delete(requesterId);
+      pendingRequests.delete(key);
     }
 
     if (approve) {
-      monitor.setController(requesterId);
+      session.setController(requesterId);
     }
 
     // 通知申请人
-    monitor.sendToClient(requesterId, "control-response", {
+    session.sendToClient(requesterId, "control-response", {
       approved: approve,
       autoApproved: false,
+      port: session.port,
     });
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, approved: approve }));
+    res.end(JSON.stringify({ ok: true, approved: approve, port: session.port }));
   } catch (err) {
     sendError(res, err);
   }
 }
 
-/** POST /force-control — 强制接管控制权 */
+/** POST /force-control — 强制接管控制权（按端口） */
 async function handleForceControl(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor
+  registry: PortRegistry,
+  audience: Audience
 ): Promise<void> {
   try {
-    const body = await parseBody<{ clientId?: string }>(req);
+    const body = await parseBody<{ clientId?: string; port?: string }>(req);
     const clientId = body.clientId;
     if (!clientId || typeof clientId !== "string") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "缺少 clientId" }));
       return;
     }
-    if (monitor.isController(clientId)) {
+    const session = resolveSessionOrFail(registry, body.port, res, audience);
+    if (!session) return;
+
+    if (session.isController(clientId)) {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, message: "已经是控制端" }));
+      res.end(JSON.stringify({ ok: true, message: `已经是 ${session.port} 的控制端` }));
       return;
     }
 
     // 未注册 clientId 不构成接管（修复假成功 200）
-    if (!monitor.isRegistered(clientId)) {
+    if (!session.isRegistered(clientId)) {
       res.writeHead(409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "clientId 未注册（需先连 /events 或 /send 自动注册）" }));
       return;
     }
 
-    // 清除该申请人之前待处理的请求
-    const timeoutId = pendingRequests.get(clientId);
+    // 清除该端口上该申请人之前待处理的请求
+    const key = pendingKey(session.port, clientId);
+    const timeoutId = pendingRequests.get(key);
     if (timeoutId) {
       clearTimeout(timeoutId);
-      pendingRequests.delete(clientId);
+      pendingRequests.delete(key);
     }
 
-    monitor.setController(clientId);
+    session.setController(clientId);
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, message: "已强制接管控制权" }));
+    res.end(JSON.stringify({ ok: true, port: session.port, message: `已强制接管 ${session.port} 的控制权` }));
   } catch (err) {
     sendError(res, err);
   }
 }
 
-/** GET /events — SSE 实时数据流 */
+/** GET /events — SSE 实时数据流（按端口订阅：?port=COM3；多路时必填，否则 400） */
 function handleSSE(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor,
-  url: URL
+  registry: PortRegistry,
+  url: URL,
+  audience: Audience
 ): void {
   const clientId = url.searchParams.get("clientId");
   if (!clientId) {
@@ -869,6 +1093,10 @@ function handleSSE(
   const name = url.searchParams.get("name") || "Anonymous";
   const ip = (req.socket.remoteAddress || "127.0.0.1").replace(/^::ffff:/, "");
 
+  // 先按端口寻址（失败会回 400/404 并说明候选端口），再建立 SSE 流
+  const session = resolveSessionOrFail(registry, url.searchParams.get("port"), res, audience);
+  if (!session) return;
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -877,7 +1105,7 @@ function handleSSE(
   });
 
   res.write(": connected\n\n");
-  monitor.addClient(clientId, res, name, ip);
+  session.addClient(clientId, res, name, ip);
 
   // 20s 心跳：代理/客户端空闲断开后服务端残连接不回收；ping 保持长连接
   const heartbeat = setInterval(() => {
@@ -888,16 +1116,22 @@ function handleSSE(
     }
   }, 20000);
 
-  // 发送结构化状态事件
-  const statusPayload = JSON.stringify(monitor.getStatus());
+  // 发送结构化状态事件（含受众与私有标记：它们是"按连接"的信息，只有这里能准确给出）
+  const statusPayload = JSON.stringify({
+    ...session.getStatus(),
+    openPorts: registry.openPortNames(audience),
+    audience,
+    private: registry.isPrivate(session.port),
+  });
   res.write(`event: status\ndata: ${statusPayload}\n\n`);
 
-  // 发送已有缓冲区数据
-  const existingData = monitor.buffer.getAll();
+  // 已有缓冲区数据同样按需推送（与 WS 一致：默认不给历史，?replay=1 才给）
+  const existingData = url.searchParams.get("replay") === "1" ? session.buffer.getAll() : "";
   if (existingData) {
     res.write(
       `data: ${JSON.stringify({
         timestamp: Date.now(),
+        port: session.port,
         text: existingData,
       })}\n\n`
     );
@@ -906,7 +1140,7 @@ function handleSSE(
   req.on("close", () => {
     clearInterval(heartbeat);
     // 传入 res 进行身份校验，避免旧连接断开误删新连接
-    monitor.removeClient(clientId, res);
+    session.removeClient(clientId, res);
   });
 }
 
@@ -922,9 +1156,10 @@ function handleSSE(
 async function handleMCPHttp(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  monitor: SerialMonitor,
+  registry: PortRegistry,
   factory?: MCPServerFactory,
-  version?: string
+  version?: string,
+  audience: Audience = "local"
 ): Promise<void> {
   if (!factory) {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -957,7 +1192,7 @@ async function handleMCPHttp(
   const transport = new NodeStreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
   });
-  const server = factory(monitor, version || "0.0.0");
+  const server = factory(registry, version || "0.0.0", { audience });
 
   transport.onclose = () => {
     const sid = transport.sessionId;

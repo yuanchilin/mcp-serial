@@ -26,11 +26,25 @@ interface WSClient {
   ws: WebSocket;
   name: string;
   clientId?: string;
+  /** 来源地址（用于"仅本机可见"切换时踢掉远程连接） */
+  ip?: string;
 }
 
 // ============================================================================
 // 持久化串口监视器 - 保持串口打开，持续接收数据
 // ============================================================================
+
+/**
+ * 控制端断开后的「控制权宽限期」（毫秒）。
+ * 用途：浏览器刷新会断开再重连 SSE，若一断开立刻把控制权提升给别人，
+ * 同 clientId 回来的页面就再也拿不回来了（多连接时尤其明显）。
+ * 0 = 立即提升（旧行为）；可用 SERIAL_CONTROL_GRACE_MS 覆盖。
+ */
+function controlGraceMs(): number {
+  const raw = Number(process.env.SERIAL_CONTROL_GRACE_MS);
+  if (Number.isFinite(raw) && raw >= 0) return raw;
+  return 10000;
+}
 
 export class SerialMonitor {
   serialPort: SerialPort | null = null;
@@ -41,6 +55,10 @@ export class SerialMonitor {
   sseClients = new Map<string, ClientInfo>();
   wsClients = new Set<WSClient>();
   controllerClientId: string | null = null;
+  /** 已断开但仍在宽限期内的控制端（等它回连复权） */
+  private pendingReleaseController: string | null = null;
+  /** 宽限期定时器 */
+  private controlReleaseTimer: ReturnType<typeof setTimeout> | null = null;
   private sendQueue: Promise<void> = Promise.resolve();
   /** 跨 chunk 边界暂存的未完成 UTF-8 字节，拼接到下个 chunk */
   private pendingBytes: Buffer = Buffer.alloc(0);
@@ -364,11 +382,13 @@ export class SerialMonitor {
 
   // ---- WebSocket 客户端管理 ----
 
-  addWSClient(ws: WebSocket, name: string, clientId?: string): void {
-    this.wsClients.add({ ws, name, clientId });
-    // 回放：把缓冲区里已有的历史数据补发给这个新连接。
-    // 否则新打开的页面只能看到"连接之后"才到的数据 —— 缓冲里明明有内容，终端却是空的。
-    this.replayBufferTo(ws);
+  addWSClient(ws: WebSocket, name: string, clientId?: string, ip?: string, opts: { replay?: boolean } = {}): void {
+    this.wsClients.add({ ws, name, clientId, ip });
+    // 回放是【按需】的，默认不补发历史：
+    // 新开的窗口 / 刷新后的页面一律从空开始（「清屏」也就成了"只是这个窗口的事"，
+    // 刷新不会把清掉的历史又倒回来）。要看服务端缓冲里的历史，得显式请求
+    // （页面上的「载入历史缓冲」按钮 → WS 带 ?replay=1）。
+    if (opts.replay) this.replayBufferTo(ws);
     ws.on("message", (data: Buffer) => {
       if (this.serialPort && this.serialPort.isOpen) {
         // 有 clientId 的 WS 连接需要校验控制权，非控制端忽略
@@ -395,6 +415,36 @@ export class SerialMonitor {
     } catch { /* 连接已失效，忽略 */ }
   }
 
+  /**
+   * 断开所有【非回环】来源的连接（SSE + WS）。
+   * 用于把某端口切换成"仅本机可见"时立即踢掉远程客户端 —— 不能切了还让它们继续收数据。
+   * 返回被踢掉的连接数。
+   */
+  disconnectRemoteClients(): number {
+    const isLoopback = (ip?: string): boolean => {
+      const a = (ip || "").replace(/^::ffff:/, "");
+      return a === "127.0.0.1" || a === "::1" || a === "localhost" || a.startsWith("127.");
+    };
+    let kicked = 0;
+    for (const [id, client] of [...this.sseClients.entries()]) {
+      if (isLoopback(client.ip)) continue;
+      this.sseClients.delete(id);
+      try { client.res?.end(); } catch { /* 连接已失效 */ }
+      kicked++;
+    }
+    for (const c of [...this.wsClients]) {
+      if (isLoopback(c.ip)) continue;
+      this.wsClients.delete(c);
+      try { c.ws.close(1008, "port is local-only now"); } catch { /* 忽略 */ }
+      kicked++;
+    }
+    if (kicked > 0) {
+      console.error(`[Privacy] ${this.port || "端口"} 已设为仅本机可见，断开 ${kicked} 个远程连接`);
+      this.broadcastStatus();
+    }
+    return kicked;
+  }
+
   broadcastWS(data: Buffer): void {
     for (const c of this.wsClients) {
       try { c.ws.send(data); } catch { this.wsClients.delete(c); }
@@ -413,6 +463,12 @@ export class SerialMonitor {
       try { existing.res.end(); } catch { /* 旧连接已失效 */ }
     }
     this.sseClients.set(clientId, { res, connectedAt: Date.now(), lastSeen: Date.now(), name, ip });
+    // 同 clientId 在宽限期内回连（典型：浏览器刷新）→ 控制权原样保留，不交给别人
+    if (this.pendingReleaseController === clientId) {
+      this.pendingReleaseController = null;
+      if (this.controlReleaseTimer) { clearTimeout(this.controlReleaseTimer); this.controlReleaseTimer = null; }
+      console.error(`[SSE] 控制端 ${clientId.slice(0, 8)} 已回连，保留控制权`);
+    }
     // 首个客户端自动成为控制端
     if (!this.controllerClientId) {
       this.controllerClientId = clientId;
@@ -469,6 +525,11 @@ export class SerialMonitor {
   /**
    * 移除客户端。res 参数用于身份校验：当存在同 clientId 的更新连接时，
    * 旧连接断开不应误删新连接。
+   *
+   * 控制权处理（刷新不丢权）：
+   * 控制端断开时**不立刻**把控制权提升给别人，而是给一个宽限期（默认 10s）。
+   * 同一个 clientId 在宽限期内回来（典型场景：浏览器刷新）→ 控制权原样保留；
+   * 宽限期到了还没回来 → 才按老规矩提升给最老的剩余客户端。
    */
   removeClient(clientId: string, res?: ServerResponse): void {
     const existing = this.sseClients.get(clientId);
@@ -479,21 +540,40 @@ export class SerialMonitor {
     this.sseClients.delete(clientId);
     console.error(`[SSE] 客户端 ${clientId.slice(0, 8)} 已断开，当前 ${this.sseClients.size} 个客户端`);
 
-    // 如果移除的是当前控制端，自动提升最老客户端
     if (this.controllerClientId === clientId) {
-      const oldest = this.getOldestClient();
-      if (oldest) {
-        this.controllerClientId = oldest;
-        this.broadcastControlEvent("control-taken", {
-          newController: oldest,
-          reason: "控制端已断开，自动提升",
-        });
-        console.error(`[SSE] 控制端已自动提升为 ${oldest.slice(0, 8)}`);
+      const graceMs = controlGraceMs();
+      if (graceMs > 0) {
+        // 宽限期内保留控制权，等同 clientId 重连后自动复权
+        if (this.controlReleaseTimer) clearTimeout(this.controlReleaseTimer);
+        this.pendingReleaseController = clientId;
+        this.controlReleaseTimer = setTimeout(() => {
+          this.controlReleaseTimer = null;
+          this.pendingReleaseController = null;
+          // 期间没人接管、且原控制端没回来 → 才提升
+          if (this.controllerClientId === clientId) this.promoteControllerAfterControllerLeft();
+        }, graceMs);
+        if (typeof this.controlReleaseTimer.unref === "function") this.controlReleaseTimer.unref();
+        console.error(`[SSE] 控制端 ${clientId.slice(0, 8)} 断开，保留控制权 ${graceMs}ms（刷新可自动复权）`);
       } else {
-        this.controllerClientId = null;
+        this.promoteControllerAfterControllerLeft();
       }
-      this.broadcastStatus();
     }
+  }
+
+  /** 控制端离开后：提升最老的剩余客户端；没有别人则置空（内部使用） */
+  private promoteControllerAfterControllerLeft(): void {
+    const oldest = this.getOldestClient();
+    if (oldest) {
+      this.controllerClientId = oldest;
+      this.broadcastControlEvent("control-taken", {
+        newController: oldest,
+        reason: "控制端已断开，自动提升",
+      });
+      console.error(`[SSE] 控制端已自动提升为 ${oldest.slice(0, 8)}`);
+    } else {
+      this.controllerClientId = null;
+    }
+    this.broadcastStatus();
   }
 
   /** 设置控制端（返回 false 表示 clientId 未注册，不设置） */
@@ -587,6 +667,8 @@ export class SerialMonitor {
 
   /** 释放资源：关闭所有 SSE/WS 长连接并断开串口（进程退出时调用） */
   dispose(): void {
+    if (this.controlReleaseTimer) { clearTimeout(this.controlReleaseTimer); this.controlReleaseTimer = null; }
+    this.pendingReleaseController = null;
     for (const [, client] of this.sseClients) {
       try { client.res?.end(); } catch { /* ignore */ }
     }

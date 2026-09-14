@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
-import { SerialMonitor } from "../build/serial-monitor.js";
+import { PortRegistry } from "../build/port-registry.js";
 import { startWebServer } from "../build/web-server.js";
 
 function lanIP() {
@@ -20,9 +20,9 @@ function lanIP() {
 }
 
 function startAuthServer(password) {
-  const monitor = new SerialMonitor(1024);
+  const registry = new PortRegistry(1024);
   let actualPort = null;
-  const server = startWebServer(0, monitor, false, undefined, undefined, (p) => { actualPort = p; }, password);
+  const server = startWebServer(0, registry, false, undefined, undefined, (p) => { actualPort = p; }, password);
   return new Promise((resolve) => {
     server.once("listening", () => {
       resolve({ server, base: `http://127.0.0.1:${actualPort}`, remote: `http://${lanIP()}:${actualPort}` });

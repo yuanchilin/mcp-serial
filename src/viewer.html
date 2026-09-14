@@ -20,6 +20,9 @@
   --t-bg:#0d1117;
 }
 *{margin:0;padding:0;box-sizing:border-box}
+/* 关键：hidden 属性必须能压过 .sec{display:flex} 这类作者样式，
+   否则"被隐藏"的区块照样显示（远程页面显示可见性开关就是这个坑）。 */
+[hidden]{display:none!important}
 html,body{height:100%}
 body{
   background:var(--bg);color:var(--text);
@@ -46,6 +49,9 @@ button.icon{width:34px;padding:0;display:inline-grid;place-items:center}
 button:disabled{opacity:.45;cursor:not-allowed}
 select{width:100%}
 input[type=number]{width:100%}
+input[type=checkbox]{width:14px;height:14px;padding:0;margin:0;flex:0 0 auto;accent-color:var(--accent);cursor:pointer}
+label.check{display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer;user-select:none}
+label.check input{height:14px}
 
 /* ---------- 顶栏 ---------- */
 #topbar{grid-column:1/-1;display:flex;align-items:center;gap:10px;
@@ -85,11 +91,25 @@ input[type=number]{width:100%}
   border-radius:6px;background:var(--panel-2)}
 #fileProg[hidden]{display:none}
 .hint{font-size:11.5px;line-height:1.7;color:var(--muted)}
+/* 发送前的固件体检提示：ok/warn/err 三档颜色 */
+.fw-info{font-size:11.5px;line-height:1.65;padding:8px 9px;border-radius:6px;word-break:break-word;
+  white-space:pre-line;border:1px solid var(--border);background:var(--panel-2);color:var(--text)}
+.fw-info.ok{border-color:var(--ok)}
+.fw-info.warn{border-color:var(--warn)}
+.fw-info.err{border-color:var(--err)}
+.fw-info .k{color:var(--muted)}
+.fw-info .bad{color:var(--err)}
+.fw-info .wr{color:var(--warn)}
+.hint b{color:var(--text);font-weight:600}
+.hint code{font-family:Consolas,monospace;font-size:11px;color:var(--text);
+  background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:0 3px}
 .sep{height:1px;background:var(--border);margin:1px 0}
 
 /* ---------- 终端区 ---------- */
 #main{grid-row:2;grid-column:2;position:relative;min-width:0;min-height:0;background:var(--t-bg)}
 #term{position:absolute;inset:8px 10px}
+.term-pane{position:absolute;inset:0}
+.term-pane[hidden]{display:none!important}
 .xterm{height:100%}
 .xterm-viewport{height:100%!important}
 .xterm-viewport::-webkit-scrollbar{width:11px}
@@ -170,13 +190,13 @@ input[type=number]{width:100%}
     <div class="field">
       <label for="ps">端口</label>
       <div class="row">
-        <select id="ps" aria-label="串口端口"></select>
+        <select id="ps" aria-label="串口端口（选择即切换操作端口）" onchange="psChanged()" title="选择即切换到这一路；未打开的端口会被打开（其他端口继续运行）"></select>
         <button onclick="rp()" title="重新扫描串口" style="flex:0 0 auto">刷新</button>
       </div>
     </div>
     <div class="field">
       <label for="bs">波特率</label>
-      <select id="bs" aria-label="波特率">
+      <select id="bs" aria-label="波特率" title="新建 / 再开一路时使用；对已连接的那一路不生效">
         <option value="1200">1200</option>
         <option value="2400">2400</option>
         <option value="4800">4800</option>
@@ -196,6 +216,16 @@ input[type=number]{width:100%}
 
   <div class="sep"></div>
 
+  <div class="sec" id="privacySec" hidden>
+    <h2>可见性 <span id="privPort" style="color:var(--text);letter-spacing:0;text-transform:none"></span></h2>
+    <label class="check" for="privChk">
+      <input type="checkbox" id="privChk" onchange="togglePrivacy(this.checked)">
+      <span>仅本机可见</span>
+    </label>
+    <p class="hint" id="privNote"></p>
+    <p class="hint">勾选后：<b>远程客户端看不到也连不上这一路</b>（连列表里都不出现）；本机访问不受影响。<br>开关需要<b>本机控制权</b>；请用 <code>http://127.0.0.1:端口</code> 打开本页（局域网 IP 访问会被当作远程）。</p>
+  </div>
+
   <div class="sec" id="ctrlSec" hidden>
     <h2>控制权</h2>
     <div class="stat"><span>当前控制端</span><b id="ctrlWho">—</b></div>
@@ -209,9 +239,10 @@ input[type=number]{width:100%}
     <h2>操作</h2>
     <div class="row">
       <button onclick="clearScreen()" title="只清浏览器显示与本地缓存，不影响服务端缓冲区（服务端请用 MCP 工具 serial_clear_buffer）">清屏</button>
-      <button onclick="copyText()">复制</button>
+      <button id="copyBtn" onclick="copyText()">复制</button>
     </div>
-    <button onclick="saveText()">保存日志</button>
+    <button id="saveBtn" onclick="saveText()">保存日志</button>
+    <button id="histBtn" onclick="loadHistory()" title="按需把服务端环形缓冲区里的历史补到终端（新窗口默认是空的）">载入历史缓冲</button>
   </div>
 
   <div class="sec">
@@ -224,6 +255,7 @@ input[type=number]{width:100%}
         <input id="chunkDelay" type="number" min="0" max="5000" step="1" value="0" aria-label="每块之间延时（毫秒）"></div>
     </div>
     <input type="file" id="filePick" hidden>
+    <div id="fwInfo" class="fw-info" hidden></div>
     <div id="fileProg" hidden>
       <div class="stat"><span id="fileProgName">—</span><b id="fileProgPct">0%</b></div>
       <div id="bar-file"><i id="fileFill"></i></div>
@@ -267,6 +299,14 @@ input[type=number]{width:100%}
   <div class="row">
     <button class="primary" onclick="respondControl(true)">同意</button>
     <button class="danger" onclick="respondControl(false)">拒绝</button>
+  </div>
+</div>
+<div class="modal-box" id="confirmBox" role="dialog" aria-modal="true" aria-labelledby="cfTitle">
+  <h3 id="cfTitle">确认</h3>
+  <p id="cfMsg"></p>
+  <div class="row">
+    <button class="primary" id="cfYes" onclick="cfAnswer(true)">确定</button>
+    <button id="cfNo" onclick="cfAnswer(false)">取消</button>
   </div>
 </div>
 <div id="toasts" aria-live="polite"></div>
@@ -316,8 +356,10 @@ function toast(msg, kind, ms){
 }
 
 // ============================ 状态与图标 ============================
-let T = null, ws = null, conn = false, log = '', isController = false;
-let evtSrc = null, pendingRequesterId = null, statusCache = null, wsRetry = null, pollTimer = null, lastSendWarn = 0;
+// P2.1：每端口一个视图（数据层多端口化；界面上仍只显示当前活动端口）
+const views = new Map();   // port -> PortView
+let cur = null;            // 当前活动视图
+let pendingRequesterId = null, pendingPort = null, pollTimer = null;
 
 function setDot(id, state, title){
   const d = $(id);
@@ -329,6 +371,10 @@ function setBadge(state, text, title){
   $('dot').className = 'dot' + (state ? ' ' + state : '');
   $('badgeText').textContent = text;
   $('badge').title = title || text;
+}
+/** 私有端口在本机界面上的标记（远程页面根本拿不到私有端口数据） */
+function badgeSuffix(){
+  return cur.privacyPrivate ? ' · 🔒仅本机' : '';
 }
 
 // ============================ 主题与字号 ============================
@@ -392,11 +438,12 @@ function applyTheme(){
   const t = THEMES[themeKey];
   for (const [k, v] of Object.entries(t.vars)) document.documentElement.style.setProperty(k, v);
   $('theme').value = themeKey;
-  if (T){
-    T.options.theme = { background:t.term.bg, foreground:t.term.fg, cursor:t.term.cursor,
+  // 主题要作用到【所有端口】的终端，而不只是当前活动的那一个
+  for (const v of views.values()){
+    v.term.options.theme = { background:t.term.bg, foreground:t.term.fg, cursor:t.term.cursor,
       selectionBackground:t.term.sel, selectionForeground:t.term.selFg };
-    fit();
   }
+  fit();
 }
 function setTheme(k){
   if (!THEMES[k]) return;
@@ -410,8 +457,87 @@ function bumpFont(d){
   if (next === fontSize) return;
   fontSize = next;
   localStorage.setItem('termFontSize', String(fontSize));
-  if (T){ T.options.fontSize = fontSize; fit(); }
+  for (const v of views.values()) v.term.options.fontSize = fontSize;
+  fit();
   toast('字号 ' + fontSize + ' px', 'info', 1300);
+}
+
+// ============================ 多端口视图层（P2.1） ============================
+// 每个端口一个独立视图：自己的终端实例、自己的 WS/SSE、自己的日志与控制权状态。
+// 界面在 P2.1 阶段仍只显示"当前活动端口"（标签栏在 P2.2 加），因此 N=1 时行为与改造前一致。
+function makeView(port){
+  const el = document.createElement('div');
+  el.className = 'term-pane';
+  el.dataset.port = port;
+  $('term').appendChild(el);
+  const term = new Terminal({
+    fontSize: fontSize,
+    fontFamily: 'Consolas,Monaco,"Cascadia Mono",monospace',
+    cursorBlink: true,
+    scrollback: 5000,
+    theme: (() => { const t = THEMES[themeKey]; return { background:t.term.bg, foreground:t.term.fg,
+      cursor:t.term.cursor, selectionBackground:t.term.sel, selectionForeground:t.term.selFg }; })(),
+  });
+  term.open(el);
+  const view = {
+    port, el, term,
+    ws: null, evtSrc: null, log: '', wsRetry: null, status: null,
+    isController: false, connected: false, lastSendWarn: 0,
+    privacyAudience: null, privacyPrivate: false,
+    /** 当前 WS 是为哪个端口建的（端口没变就不必重建，避免多余连接） */
+    wsPort: null,
+  };
+  term.onData(data => sendInput(view, data));
+  // 选中内容也能复制 → 选择变化时刷新"复制/保存"的可用性
+  if (term.onSelectionChange) term.onSelectionChange(() => { if (view === cur) updateLogUI(view); });
+  term.onScroll(() => { if (view === cur) updateBottomBtn(); });
+  term.element.addEventListener('wheel', e => {
+    if (e.ctrlKey){ e.preventDefault(); bumpFont(e.deltaY > 0 ? -1 : 1); }
+  }, { passive: false });
+  if (window.ResizeObserver) new ResizeObserver(() => { if (view === cur) scheduleFit(); }).observe(el);
+  views.set(port, view);
+  return view;
+}
+/** 取（必要时创建）某端口的视图 */
+function viewFor(port){ return views.get(port) || makeView(port); }
+/** 切换操作端口：只切换显示，不销毁、不重连（下拉选择 / 点列表都走这里） */
+function activate(port){
+  if (cur && cur.port === port) return cur;
+  const view = viewFor(port);
+  for (const other of views.values()) other.el.hidden = (other !== view);
+  cur = view;
+  pendingRequesterId = null;
+  // 只记"真的端口"：占位视图（port 为空）不能把用户上次的选择抹掉，
+  // 否则 F5 之后就没有可恢复的目标，只能退化成"接上唯一在跑的那一路"。
+  if (port){ try{ localStorage.setItem('activePort', port); }catch(_){} }
+  syncSidebarFor(view);
+  requestAnimationFrame(() => fit());   // 隐藏容器尺寸为 0，必须先显示再 fit
+  setTimeout(fit, 80);
+  if (view.connected) view.term.focus();
+  return view;
+}
+/** 用户上次停留的操作端口（刷新后据此恢复，不替用户改选） */
+function savedActivePort(){ try{ return localStorage.getItem('activePort') || ''; }catch(_){ return ''; } }
+/** 侧栏跟随活动标签：端口/波特率下拉、统计、可见性、控制权都切到这一路 */
+function syncSidebarFor(view){
+  if (!view) return;
+  const p = view.port || (view.status && view.status.port) || '';
+  if (p && ![...$('ps').options].some(o => o.value === p)){
+    const o = document.createElement('option'); o.value = p; o.textContent = p;
+    $('ps').appendChild(o);
+  }
+  if (p) $('ps').value = p;
+  resetUserPicks();                                   // 换标签 = 换目标端口，旧的手选作废
+  if (view.status) renderStatus(view, view.status);    // 用缓存状态立即重画，不等下一次轮询
+  else {
+    // 这一路从没连上过（或已断开且无状态）：不能把上一路的侧栏内容留在屏幕上
+    $('ctrlSec').hidden = true; $('statsSec').hidden = true; $('privacySec').hidden = true;
+    setBadge('', '未连接', '串口未打开');
+    updateSendUI(view);
+    updateLogUI(view);
+  }
+  updateCtrlUI(view, view.status ? view.status.controllerClientId : null);
+  updateConnectButton();
 }
 
 // ============================ 自适应尺寸 ============================
@@ -420,15 +546,15 @@ meas.setAttribute('aria-hidden', 'true');
 meas.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;top:-9999px';
 meas.textContent = 'W';
 function fit(){
-  if (!T) return;
-  const el = $('term');
+  if (!cur || !cur.term || cur.el.hidden) return;
+  const el = cur.el;
   const w = el.clientWidth, h = el.clientHeight;
   if (w < 20 || h < 20) return;
   if (!meas.isConnected) document.body.appendChild(meas);
-  meas.style.font = T.options.fontSize + 'px ' + T.options.fontFamily;
+  meas.style.font = cur.term.options.fontSize + 'px ' + cur.term.options.fontFamily;
   const cw = meas.getBoundingClientRect().width || 8;
-  const ch = T.options.fontSize * 1.35;
-  T.resize(Math.max(2, Math.floor(w / cw)), Math.max(2, Math.floor(h / ch)));
+  const ch = cur.term.options.fontSize * 1.35;
+  cur.term.resize(Math.max(2, Math.floor(w / cw)), Math.max(2, Math.floor(h / ch)));
 }
 function scheduleFit(){
   requestAnimationFrame(() => fit());
@@ -460,57 +586,80 @@ if (!isNarrow() && localStorage.getItem('navCollapsed') === '1'){
 }
 
 // ============================ 控制权对话框 ============================
-function showCtrlDialog(requesterId, requesterName){
+function showCtrlDialog(requesterId, requesterName, port){
   pendingRequesterId = requesterId;
-  $('ctrl-msg').textContent = '客户端 ' + (requesterName || requesterId.slice(0, 8)) + ' 申请控制权，是否同意？';
+  pendingPort = port || (cur && cur.port) || '';
+  $('ctrl-msg').textContent = '客户端 ' + (requesterName || requesterId.slice(0, 8)) + ' 申请' +
+    (pendingPort ? ('「' + pendingPort + '」') : '') + '控制权，是否同意？';
   $('ctrlOverlay').classList.add('open');
   $('ctrlDialog').classList.add('open');
 }
 function hideCtrlDialog(){
   pendingRequesterId = null;
-  $('ctrlOverlay').classList.remove('open');
+  pendingPort = null;
   $('ctrlDialog').classList.remove('open');
+  // 遮罩是"控制权对话框 / 发送确认框"共用的：另一个还开着就不能撤
+  if (!$('confirmBox').classList.contains('open')) $('ctrlOverlay').classList.remove('open');
 }
 async function respondControl(approve){
-  if (!pendingRequesterId){ hideCtrlDialog(); return; }
+  const requesterId = pendingRequesterId, port = pendingPort;
+  if (!requesterId){ hideCtrlDialog(); return; }
   try{
+    // 控制权按端口：应答也要带 port（多路时省略会被服务端拒绝）
     const r = await fetch(tk(B + '/respond-control'), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId:CID, requesterId:pendingRequesterId, approve }) });
-    if (!r.ok) toast('响应失败', 'err');
+      body: JSON.stringify({ clientId:CID, requesterId, approve, port }) });
+    if (!r.ok){
+      const d = await r.json().catch(() => ({}));
+      toast('响应失败：' + (d.error || ('HTTP ' + r.status)), 'err', 4000);
+    }
   }catch(_){ toast('响应失败：网络错误', 'err'); }
   hideCtrlDialog();
 }
 
 // ============================ 控制端 UI ============================
-function updateCtrlUI(controllerId){
-  const wasController = isController;
-  isController = (controllerId === CID);
+function updateCtrlUI(view, controllerId){
+  if (!view) return;
+  const wasController = view.isController;
+  view.isController = (controllerId === CID);
+  if (view !== cur) return;          // 只有活动端口驱动侧栏/徽标
   const who = controllerId ? (controllerId === CID ? '本机（你）' : controllerId.slice(0, 8)) : '无';
   $('ctrlWho').textContent = who;
-  if (conn){
-    const label = (statusCache && statusCache.port) || $('ps').value || '串口';
-    const rate = (statusCache && statusCache.baudRate) || $('bs').value || '';
-    setBadge(isController ? 'ok' : 'warn',
-      label + (rate ? ' · ' + rate : '') + (isController ? ' · 控制端' : ' · 监视端'),
-      isController ? '本机持有控制权，可直接发送数据' : '监视模式：只读，发送前需申请或强制接管控制权');
-    $('ctrlSec').hidden = isController;
+  if (view.connected){
+    const label = (view.status && view.status.port) || $('ps').value || '串口';
+    const rate = (view.status && view.status.baudRate) || $('bs').value || '';
+    setBadge(view.isController ? 'ok' : 'warn',
+      label + (rate ? ' · ' + rate : '') + (view.isController ? ' · 控制端' : ' · 监视端') + badgeSuffix(),
+      view.isController ? '本机持有控制权，可直接发送数据' : '监视模式：只读，发送前需申请或强制接管控制权');
+    $('ctrlSec').hidden = view.isController;
     const cbBtn = $('cb');
-    cbBtn.title = isController ? '断开串口（会释放端口）' : '监视端：断开需要先申请或强制接管控制权';
-    if (!wasController && isController) toast('已获得控制权', 'ok');
-    if (wasController && !isController) toast('已失去控制权', 'warn');
+    cbBtn.title = view.isController ? '断开串口（会释放端口）' : '监视端：断开需要先申请或强制接管控制权';
+    renderPrivacy(view);   // 控制权变化时刷新"可见性"开关的可编辑状态
+    if (!wasController && view.isController) toast('已获得控制权', 'ok');
+    if (wasController && !view.isController) toast('已失去控制权', 'warn');
   }
+  updateSendUI(view);   // 控制权变了 → 发送按钮的可用性跟着变
 }
 
+// 关键：状态刷新不得覆盖"用户手选的目标端口/波特率"，
+// 否则刚在下拉里选好另一个口，2 秒内就被回滚成当前活动端口 → 永远切不过去。
+let psUserPicked = false, bsUserPicked = false;
+function resetUserPicks(){ psUserPicked = false; bsUserPicked = false; }
+
 // ============================ 状态渲染 ============================
-function renderStatus(s){
-  statusCache = s;
+function renderStatus(view, s){
+  if (!view) return;
+  view.status = s;
+  if (s.audience) view.privacyAudience = s.audience;
+  if (typeof s.private === 'boolean') view.privacyPrivate = s.private;
+  // 端口标签/侧栏/统计只反映【当前活动端口】；非活动视图仅保存状态（P2.2 的标签栏要用）
+  if (view !== cur) return;
   if (s.port){
     // 端口下拉里没有该端口时补一项（例如启动时自动连接的端口不在当前列表）
     if (![...$('ps').options].some(o => o.value === s.port)){
       const o = document.createElement('option'); o.value = s.port; o.textContent = s.port;
       $('ps').appendChild(o);
     }
-    $('ps').value = s.port;
+    if (!psUserPicked) $('ps').value = s.port;   // 用户手选过就尊重他的选择
   }
   if (s.baudRate){
     const v = String(s.baudRate);
@@ -518,160 +667,415 @@ function renderStatus(s){
       const o = document.createElement('option'); o.value = v; o.textContent = v;
       $('bs').appendChild(o);
     }
-    $('bs').value = v;
+    if (!bsUserPicked) $('bs').value = v;
   }
   const stats = s.stats || {};
   const total = stats.totalBytes || 0, max = stats.bufferMaxSize || 1;
+  // 徽标也在这里画：否则切到"已断开"的那一路时，徽标会留着上一路的端口名（张冠李戴）
+  if (s.connected){
+    setBadge(view.isController ? 'ok' : 'warn',
+      (s.port || '串口') + ' · ' + (s.baudRate || '') + (view.isController ? ' · 控制端' : ' · 监视端') + badgeSuffix());
+  }else{
+    setBadge('', '未连接', '串口未打开');
+  }
   $('stRecv').textContent = fmtBytes(total);
   $('stBuf').textContent = fmtBytes(total) + ' / ' + fmtBytes(max);
   $('bufFill').style.width = Math.min(100, total / max * 100).toFixed(1) + '%';
   $('stChunks').textContent = String(stats.chunkCount || 0);
   $('stUp').textContent = fmtDur(s.uptimeMs || 0);
   $('stClients').textContent = String(s.clientCount || 0);
+  renderPrivacy(view);
+  updateConnectButton();   // 操作端口/连接状态变化 → 主按钮语义随之更新
+  // "控制权 / 统计"两块是否出现由连接状态决定；集中在这里，换端口时也会被重画
+  $('ctrlSec').hidden = !s.connected || view.isController;
+  $('statsSec').hidden = !s.connected;
+  updateSendUI(view);      // 未连接 / 监视端 → 发送按钮如实置灰
+  updateLogUI(view);       // 没有任何输出 → 复制/保存日志置灰
+}
+
+// ============================ 可见性（仅本机可见） ============================
+// 显示条件：必须【本机访问】才显示；可操作条件：还必须持有【该端口的控制权】。
+// 注意：SSE 的 status 事件不带 audience/private 字段，所以这里要"记住"最近一次明确的值，
+// 否则每次 SSE 推送都会把区块误判成非本机而隐藏（纯前端现象，服务端始终照常拦截）。
+// （这两个值随视图保存：cur.privacyAudience / cur.privacyPrivate，在 makeView 里初始化）
+function renderPrivacy(view){
+  const target = view || cur;
+  if (!target) return;
+  const st = target.status || {};
+  const isLocalAudience = target.privacyAudience === 'local';
+  const hasPort = !!st.port;
+  if (target !== cur) return;       // 只有活动端口驱动侧栏
+  $('privacySec').hidden = !(isLocalAudience && hasPort);
+  $('privPort').textContent = hasPort ? ('· ' + st.port) : '';
+  if (isLocalAudience && hasPort){
+    $('privChk').checked = target.privacyPrivate;
+    $('privChk').disabled = !target.isController;
+    $('privNote').textContent = target.isController ? '' : '需要本机控制权才能修改（先「申请控制」或「强制接管」）';
+  }
+}
+async function togglePrivacy(on){
+  const port = cur.status && cur.status.port;
+  if (!port){
+    toast('请先选择并连接一个串口', 'warn');
+    $('privChk').checked = false;
+    return;
+  }
+  if (!cur.isController){
+    toast('需要本机控制权才能修改可见性（先「申请控制」或「强制接管」）', 'warn', 3600);
+    $('privChk').checked = !on;
+    return;
+  }
+  try{
+    const r = await fetch(tk(B + '/privacy'), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ port, private: !!on, clientId: CID }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok){
+      toast('设置失败：' + (d.error || ('HTTP ' + r.status)), 'err', 4000);
+      $('privChk').checked = !on;
+      return;
+    }
+    toast(on ? `「${port}」已设为仅本机可见（断开 ${d.kicked || 0} 个远程连接）` : `「${port}」已对远程可见`, 'ok', 4000);
+    await refreshStatus();
+  }catch(e){
+    toast('设置失败：' + (e && e.message ? e.message : e), 'err', 4000);
+    $('privChk').checked = !on;
+  }
 }
 async function refreshStatus(){
   if (document.hidden) return;
+  const view = cur;
+  if (!view) return;
   try{
-    const r = await fetch(tk(B + '/status'));
+    const q = view.port ? ('/status?port=' + encodeURIComponent(view.port)) : '/status';
+    const r = await fetch(tk(B + q));
     if (!r.ok) return;
     const s = await r.json();
-    renderStatus(s);
-    if (s.connected){
-      setBadge(isController ? 'ok' : 'warn',
-        (s.port || '串口') + ' · ' + (s.baudRate || '') + (isController ? ' · 控制端' : ' · 监视端'));
+    lastAudience = s.audience || lastAudience;
+    renderStatus(view, s);
+    reconcilePorts(s);
+    if (s.connected && view === cur){
+      setBadge(view.isController ? 'ok' : 'warn',
+        (s.port || '串口') + ' · ' + (s.baudRate || '') + (view.isController ? ' · 控制端' : ' · 监视端') + badgeSuffix());
     }
   }catch(_){}
 }
 
-// ============================ SSE 事件通道 ============================
-function connectSSE(){
-  if (evtSrc){ evtSrc.close(); evtSrc = null; }
-  setDot('dotSse', 'warn', '事件通道（SSE）连接中…');
+// ============================ 操作端口切换（下拉框即切换） ============================
+// 可以同时开多路，但界面只保留【一个操作端口】：端口下拉框就是切换器。
+// 选已打开的端口 = 只切显示（不重连、不断开别的端口）；选没打开的 = 打开它并切过去。
+let lastAudience = null;        // 最近一次明确知道的访问来源（local / remote）
+let openSetCache = new Set();   // 服务端当前在跑的端口（轮询刷新，供下拉标记/判断用）
+const openPortCount = () => new Set([...views.values()].map(v => v.port).filter(Boolean)).size;
+
+/** 下拉里补一个端口项（记住基名，"运行中"前缀是叠加上去的） */
+function ensurePortOption(port){
+  const sel = $('ps');
+  let o = [...sel.options].find(x => x.value === port);
+  if (!o){
+    o = document.createElement('option');
+    o.value = port;
+    o.dataset.base = port;
+    o.textContent = port;
+    sel.appendChild(o);
+  }
+  return o;
+}
+/** 下拉里标出哪些端口正在运行（● 前缀），一眼看出该切到哪一路 */
+function syncPortOptions(open){
+  const openSet = new Set(open || []);
+  for (const o of [...$('ps').options]){
+    if (!o.value) continue;
+    if (!o.dataset.base) o.dataset.base = o.value;
+    const text = (openSet.has(o.value) ? '● ' : '') + o.dataset.base;
+    if (o.textContent !== text) o.textContent = text;
+  }
+}
+/** 选择即切换操作端口：绝不在这里开端口 —— 打开是「连接」按钮的事 */
+async function psChanged(){
+  psUserPicked = false;
+  const p = $('ps').value;
+  if (!p){ updateConnectButton(); return; }
+  if (isRunning(p)){
+    const v = views.get(p);
+    if (v && v.connected) activate(p);              // 已在跑且本页有视图：只换显示
+    else attachExistingPort(p);                     // 别处开的端口：接上看，不调 /connect
+    return;
+  }
+  // 没在跑的端口：只切过去当"当前操作端口"（显示未连接），要不要打开由用户点「连接」
+  const v = activate(p);
+  if (v && !v.status && !v.log) v.term.write('未连接：点「连接」打开 ' + p + '\r\n');
+  updateConnectButton();
+}
+
+/** 某个端口现在是否在跑：以轮询到的服务端事实为准，其次看本页已知的视图状态 */
+function isRunning(port){
+  if (openSetCache.has(port)) return true;
+  return [...views.values()].some(v => v.port === port && v.status && v.status.connected);
+}
+/** 给"已经在别处（MCP / 另一个页面）打开"的端口接上视图与两条通道：不调 /connect、不抢控制权 */
+function attachExistingPort(port){
+  const v = viewFor(port);
+  v.connected = true;
+  if (!v.status) v.status = { connected: true, port };   // 先按运行中画，真状态由 SSE 首帧修正
+  connectSSE(v);
+  connectWS(v, true);
+  activate(port);
+  toast('已切到 ' + port + '（这一路是别处打开的，本页只读监视）', 'info', 2600);
+  return v;
+}
+/** 轮询同步：下拉里的运行中标记 + 页面上还没有操作端口时自动接上一路 */
+function reconcilePorts(s, savedOverride){
+  if (!s) return;
+  const open = Array.isArray(s.openPorts) ? s.openPorts : [];
+  openSetCache = new Set(open);
+  for (const p of open) ensurePortOption(p);
+  syncPortOptions(open);
+  // 兜底"打开即见"只在【用户从没选过端口】时生效：
+  // 一旦有上次停留的端口（哪怕它没在跑），就以用户的选择为准，绝不改选到别路。
+  const saved = savedOverride !== undefined ? savedOverride : savedActivePort();
+  if ((!cur || !cur.port) && !saved && open.length === 1) attachExistingPort(open[0]);
+}
+
+// ============================ SSE 事件通道（每端口一条） ============================
+function connectSSE(view){
+  if (!view) return;
+  view.__closed = false;                 // 重新启用（关视图时会被置位，避免关掉后又自我重连）
+  if (view.evtSrc){ view.evtSrc.close(); view.evtSrc = null; }
+  if (view === cur) setDot('dotSse', 'warn', '事件通道（SSE）连接中…');
   const name = navigator.userAgent.slice(0, 30).replace(/\s+/g, ' ');
-  evtSrc = new EventSource(tk(B + '/events?clientId=' + encodeURIComponent(CID) + '&name=' + encodeURIComponent(name)));
-  evtSrc.onopen = () => setDot('dotSse', 'ok', '事件通道（SSE）已连接');
-  evtSrc.addEventListener('status', e => {
+  const portQ = view.port ? ('&port=' + encodeURIComponent(view.port)) : '';
+  view.evtSrc = new EventSource(tk(B + '/events?clientId=' + encodeURIComponent(CID) + '&name=' + encodeURIComponent(name) + portQ));
+  view.evtSrc.onopen = () => { if (view === cur) setDot('dotSse', 'ok', '事件通道（SSE）已连接'); };
+  view.evtSrc.addEventListener('status', e => {
     try{
       const s = JSON.parse(e.data);
-      renderStatus(s);
+      renderStatus(view, s);
       if (s.connected){
-        if (!conn){
-          conn = true;
-          $('cb').textContent = '断开'; $('cb').className = 'danger';
-          $('ctrlSec').hidden = false; $('statsSec').hidden = false;
-          connectWS();
+        if (!view.connected){
+          view.connected = true;
+          if (view === cur){
+            updateConnectButton();
+            $('ctrlSec').hidden = false; $('statsSec').hidden = false;
+          }
+          connectWS(view);
           startPolling();
         }
-        updateCtrlUI(s.controllerClientId);
+        updateCtrlUI(view, s.controllerClientId);
       }else{
-        conn = false;
-        $('cb').textContent = '连接'; $('cb').className = 'primary';
-        setBadge('', '未连接', '串口未打开');
-        $('ctrlSec').hidden = true; $('statsSec').hidden = true;
-        if (ws){ try{ ws.close(); }catch(_){} ws = null; }
+        view.connected = false;
+        if (view === cur){
+          updateConnectButton();
+          setBadge('', '未连接', '串口未打开');
+          $('ctrlSec').hidden = true; $('statsSec').hidden = true;
+        }
+        closeWS(view);
         stopPolling();
       }
     }catch(_){}
   });
-  evtSrc.addEventListener('control-request', e => {
+  view.evtSrc.addEventListener('control-request', e => {
     try{
       const d = JSON.parse(e.data);
-      if (isController) showCtrlDialog(d.requesterId, '');
+      if (view.isController) showCtrlDialog(d.requesterId, '', d.port || view.port);
     }catch(_){}
   });
-  evtSrc.addEventListener('control-response', e => {
+  view.evtSrc.addEventListener('control-response', e => {
     try{
       const d = JSON.parse(e.data);
       if (d.approved) toast(d.autoApproved ? '控制权已自动获得（原控制端超时）' : '控制权申请已通过', 'ok');
       else toast('控制权申请被拒绝', 'err');
     }catch(_){}
   });
-  evtSrc.addEventListener('control-taken', e => {
+  view.evtSrc.addEventListener('control-taken', e => {
     try{
       const d = JSON.parse(e.data);
-      updateCtrlUI(d.newController);
+      updateCtrlUI(view, d.newController);
     }catch(_){}
   });
-  evtSrc.onerror = () => {
-    setDot('dotSse', 'err', '事件通道（SSE）断开，2 秒后重连…');
-    setTimeout(connectSSE, 2000);
+  view.evtSrc.onerror = () => {
+    if (view.__closed) return;           // 视图已关闭：不再重连
+    if (view === cur) setDot('dotSse', 'err', '事件通道（SSE）断开，2 秒后重连…');
+    setTimeout(() => connectSSE(view), 2000);
   };
 }
 
-// ============================ WebSocket 终端通道 ============================
-function connectWS(){
-  const old = ws;
-  if (old){ try{ old.close(); }catch(_){} }
+// ============================ WebSocket 终端通道（每端口一条） ============================
+/** 主动关闭某端口的终端通道（标记为"有意关闭"，避免触发自动重连） */
+function closeWS(view){
+  const v = view || cur;
+  if (!v || !v.ws) return;
+  v.ws.__intentionalClose = true;
+  try{ v.ws.close(); }catch(_){}
+  v.ws = null;
+}
+
+// 必须区分"我们主动关闭"与"连接掉线"：否则 connectWS() 关掉旧连接时，
+// 旧连接的 onclose 又排一次重连 → 自激重连风暴（每 1.5s 新建一条 WS，
+// 每条都让服务端回放一次缓冲，终端就会把同一段内容反复重画）。
+function connectWS(view, force, opts){
+  const v = view || cur;
+  if (!v) return;
+  // 幂等：已有连接且（未要求强制 / 端口没变）就不重建 —— 避免白建一条再关掉
+  if (v.ws && (v.ws.readyState === WebSocket.OPEN || v.ws.readyState === WebSocket.CONNECTING)){
+    if (!force || v.wsPort === v.port) return;
+  }
+
+  if (v.ws) closeWS(v);
   const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  const next = new WebSocket(tk(scheme + location.host + '/?clientId=' + encodeURIComponent(CID)));
-  ws = next;
+  const portQ = v.port ? ('&port=' + encodeURIComponent(v.port)) : '';
+  // 默认不带 replay：服务端不补发历史，新窗口/刷新后从空开始（清屏才真正"只是这个窗口的事"）。
+  // 只有「载入历史缓冲」会显式要一次历史。
+  const replayQ = (opts && opts.replay) ? '&replay=1' : '';
+  const next = new WebSocket(tk(scheme + location.host + '/?clientId=' + encodeURIComponent(CID) + portQ + replayQ));
+  v.ws = next;
+  v.wsPort = v.port;
   next.binaryType = 'arraybuffer';
-  next.onopen = () => setDot('dotWs', 'ok', '终端通道（WebSocket）已连接');
+  next.onopen = () => {
+    if (v.wsRetry){ clearTimeout(v.wsRetry); v.wsRetry = null; }
+    if (v === cur) setDot('dotWs', 'ok', '终端通道（WebSocket）已连接');
+  };
   next.onmessage = e => {
     if (e.data instanceof ArrayBuffer){
       const b = new Uint8Array(e.data);
-      T.write(b);
-      log += new TextDecoder().decode(b);
-      if (log.length > 1 << 20) log = log.slice(-(1 << 19));
+      v.term.write(b);
+      const wasEmpty = !v.log;
+      v.log += new TextDecoder().decode(b);
+      if (v.log.length > 1 << 20) v.log = v.log.slice(-(1 << 19));
+      // 有内容了 → 让"复制/保存"从灰变亮（只在空→非空时动一次 DOM）
+      if (wasEmpty && v.log && v === cur && $('copyBtn') && $('copyBtn').disabled) updateLogUI(v);
     }
   };
   next.onclose = () => {
-    if (ws === next) ws = null;
-    setDot('dotWs', 'err', '终端通道已断开');
-    if (conn && !wsRetry) wsRetry = setTimeout(() => { wsRetry = null; if (conn) connectWS(); }, 1500);
+    if (v.ws === next) v.ws = null;
+    if (v === cur) setDot('dotWs', 'err', '终端通道已断开');
+    if (next.__intentionalClose) return;   // 主动关闭：不重连
+    if (v.connected && !v.wsRetry){
+      v.wsRetry = setTimeout(() => { v.wsRetry = null; if (v.connected) connectWS(v, true); }, 1500);
+    }
   };
-  next.onerror = () => setDot('dotWs', 'err', '终端通道错误');
+  next.onerror = () => { if (v === cur) setDot('dotWs', 'err', '终端通道错误'); };
 }
 
-// ============================ 状态轮询（统计） ============================
+// ============================ 状态轮询（统计 + 发现别处打开的端口） ============================
 function startPolling(){
-  stopPolling();
-  pollTimer = setInterval(refreshStatus, 2000);
+  if (pollTimer) return;          // 常驻心跳：只建一次（断开某一路也不停，否则发现不了新端口）
+  pollTimer = setInterval(pollTick, 2000);
 }
 function stopPolling(){
   if (pollTimer){ clearInterval(pollTimer); pollTimer = null; }
 }
+async function pollTick(){
+  if (document.hidden) return;
+  let s = null;
+  try{
+    const r = await fetch(tk(B + '/status'));
+    if (!r.ok) return;
+    s = await r.json();
+  }catch(_){ return; }
+  lastAudience = s.audience || lastAudience;
+  reconcilePorts(s);
+  if (!cur || !cur.connected) return;
+  // 一次请求拿到全部端口；活动端口的统计从 ports[] 里挑自己那一路
+  const mine = (Array.isArray(s.ports) && s.ports.find(p => p.port === cur.port)) ||
+               (s.port === cur.port ? s : null);
+  if (mine) renderStatus(cur, mine);
+}
 
 // ============================ 连接 / 断开 ============================
-async function tc(){
-  if (conn){ await dc(); return; }
-  const p = $('ps').value;
-  if (!p){ toast('请先选择串口', 'warn'); return; }
-  const baud = parseInt($('bs').value, 10) || 115200;
+/** 主按钮只有两种语义：当前操作端口在跑 → 断开；没跑 → 打开（换端口用上面的下拉框） */
+function updateConnectButton(){
+  const btn = $('cb');
+  if (!btn || !cur) return;
+  const selected = $('ps').value;
+  if (cur.connected){
+    btn.textContent = '断开';
+    btn.className = 'danger';
+    btn.title = cur.isController
+      ? '断开这一路（其他端口不受影响）'
+      : '监视端：断开需要先申请或强制接管控制权';
+  }else{
+    btn.textContent = '连接';
+    btn.className = 'primary';
+    btn.title = selected ? ('打开 ' + selected) : '请先选择串口';
+  }
+}
+
+/** 打开端口并切过去（不动其他已在运行的端口）；打开失败则退回原端口 */
+async function openPort(port, baud){
+  // 复用"等待连接"的占位视图（端口为空且没连上），避免多养一个空终端
+  const ph = views.get('');
+  const created = !views.has(port) && !(ph && !ph.connected);
+  const v = views.get(port) || (ph && !ph.connected ? ph : viewFor(port));
+  const fallback = (cur && cur.port) || '';
   $('cb').disabled = true;
   try{
     const r = await fetch(tk(B + '/connect'), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ port:p, baudRate:baud, clientId:CID }) });
+      body: JSON.stringify({ port, baudRate: baud, clientId: CID }) });
     if (!r.ok){
-      const d = await r.json().catch(() => ({ error:'连接失败' }));
+      const d = await r.json().catch(() => ({}));
       if (d.error && d.error.includes('没有控制权限')) toast('没有控制权限，请先「申请控制」或「强制接管」', 'warn', 4000);
-      else toast('连接失败：' + (d.error || r.status), 'err', 4000);
+      else toast('打开 ' + port + ' 失败：' + (d.error || ('HTTP ' + r.status)), 'err', 4000);
+      if (created){                              // 新建的空视图：没打开就收拾掉，别留个空视图
+        views.delete(v.port);
+        try{ v.term.dispose(); }catch(_){}
+        try{ v.el.remove(); }catch(_){}
+      }
+      if (fallback) $('ps').value = fallback;    // 下拉退回原来的操作端口
+      updateConnectButton();
       return;
     }
-    conn = true;
-    $('cb').textContent = '断开'; $('cb').className = 'danger';
-    $('ctrlSec').hidden = false; $('statsSec').hidden = false;
-    setBadge('warn', p + ' · ' + baud + (isController ? ' · 控制端' : ' · 监视端'));
-    connectWS();
+    adoptPort(v, port);
+    v.connected = true;
+    v.privacyPrivate = false;
+    openSetCache.add(port);
+    syncPortOptions([...openSetCache]);
+    activate(port);                              // 切到刚打开的这一路
+    resetUserPicks();
+    setBadge('warn', port + ' · ' + baud);
+    connectSSE(v);
+    connectWS(v, true);
     startPolling();
-    toast('已连接 ' + p + ' @ ' + baud, 'ok');
+    await refreshStatus();
+    toast('已打开 ' + port + ' @ ' + baud +
+      (openPortCount() > 1 ? ('（当前共 ' + openPortCount() + ' 路在运行）') : ''), 'ok');
   }catch(e){
-    toast('连接失败：' + (e && e.message ? e.message : e), 'err', 4000);
+    toast('打开 ' + port + ' 失败：' + (e && e.message ? e.message : e), 'err', 4000);
+    if (fallback) $('ps').value = fallback;
   }finally{
     $('cb').disabled = false;
+    updateConnectButton();
   }
+}
+
+/** 主按钮：当前操作端口在跑 → 断开；没跑 → 打开（下拉已能切换端口，这里只做这个） */
+async function tc(){
+  if (cur && cur.connected){ await dc(); return; }
+  const selected = $('ps').value;
+  if (!selected){ toast('请先选择串口', 'warn'); return; }
+  await openPort(selected, parseInt($('bs').value, 10) || 115200);
+}
+
+/** 兼容旧入口（书签/外部脚本里可能还调 switchTo）：等价于在下拉里选中它 */
+async function switchTo(port){
+  if (!port) return;
+  ensurePortOption(port);
+  $('ps').value = port;
+  await psChanged();
 }
 async function dc(){
   // 监视端没有断开权限：服务端会 403。此时【必须什么都不改】，
   // 否则本地状态会假变成"未连接"，随后被 SSE/轮询翻回来 —— 一次假动作 + 闪一下。
-  if (!isController){
+  if (!cur) return;
+  if (!cur.isController){
     toast('监视端不能断开串口，请先「申请控制」或「强制接管」', 'warn', 3600);
     return;
   }
+  // 必须带 port：P1 起 /disconnect 要求显式指定端口（全关需 all:true）
+  const targetPort = (cur.status && cur.status.port) || $('ps').value || '';
   $('cb').disabled = true;
   try{
     const r = await fetch(tk(B + '/disconnect'), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId:CID }) });
+      body: JSON.stringify({ clientId:CID, port: targetPort }) });
     if (!r.ok){
       const d = await r.json().catch(() => ({}));
       toast('断开失败：' + (d.error || ('HTTP ' + r.status)), 'err', 4000);
@@ -683,29 +1087,41 @@ async function dc(){
   }finally{
     $('cb').disabled = false;
   }
-  if (ws){ try{ ws.close(); }catch(_){} ws = null; }
-  conn = false;
-  $('cb').textContent = '连接'; $('cb').className = 'primary';
+  closeWS();
+  cur.connected = false;
+  // 同步缓存的状态：否则 isRunning() 会拿"断开前"的旧状态当"还在跑"，
+  // 再从下拉里选这个端口时会走"接上已开端口"分支（那个端口其实已经关了）
+  cur.status = Object.assign({}, cur.status, { connected: false });
+  openSetCache.delete(targetPort);          // 下拉里的"运行中"标记立刻跟着撤掉
+  syncPortOptions([...openSetCache]);
+  resetUserPicks();
+  updateConnectButton();
   setBadge('', '未连接', '串口未打开');
   $('ctrlSec').hidden = true; $('statsSec').hidden = true;
-  stopPolling();
-  toast('已断开', 'info', 1600);
+  updateSendUI();
+  toast('已断开这一路（其他端口不受影响）', 'info', 1800);
 }
 async function rp(){
   try{
     const r = await fetch(tk(B + '/ports'));
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const a = await r.json();
-    const cur = $('ps').value;
+    const keep = $('ps').value;
     $('ps').innerHTML = '<option value="">-- 端口 --</option>';
     a.forEach(p => {
       const o = document.createElement('option');
       o.value = p.path;
-      o.textContent = p.path + (p.manufacturer ? ' - ' + p.manufacturer : '');
-      if (p.path === cur) o.selected = true;
+      o.dataset.base = p.path + (p.manufacturer ? ' - ' + p.manufacturer : '');
+      o.textContent = o.dataset.base;
       $('ps').appendChild(o);
     });
-    if (statusCache && statusCache.port) $('ps').value = statusCache.port;
+    // 已在跑的端口可能不在这份扫描列表里（例如测试用的假串口）→ 补进来，别让切换器漏项
+    for (const p of openSetCache) ensurePortOption(p);
+    // 当前选中的 / 正在操作的端口也必须还在：否则一次「刷新」就把下拉和实际操作端口搞脱钩
+    if (keep) ensurePortOption(keep);
+    if (cur && cur.port) ensurePortOption(cur.port);
+    syncPortOptions([...openSetCache]);
+    $('ps').value = keep || (cur && cur.port) || '';
     toast('串口列表已刷新（' + a.length + ' 个）', 'info', 1600);
   }catch(e){
     $('ps').innerHTML = '<option value="">获取失败</option>';
@@ -714,34 +1130,87 @@ async function rp(){
 }
 
 // ============================ 控制权申请 / 接管 ============================
+/** 控制权是【按端口】的：这些请求都必须带上当前操作端口，否则多路时服务端会拒绝（400） */
+function controlPortOrWarn(action){
+  const port = (cur && (cur.port || (cur.status && cur.status.port))) || '';
+  if (!port){
+    toast('请先在「端口」里选定一路，再' + action, 'warn', 3000);
+    return '';
+  }
+  return port;
+}
 async function requestControl(){
+  const port = controlPortOrWarn('申请控制权');
+  if (!port) return;
   try{
     const r = await fetch(tk(B + '/request-control'), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId:CID }) });
+      body: JSON.stringify({ clientId: CID, port }) });
     const d = await r.json().catch(() => ({}));
-    toast(d.message || (r.ok ? '已发送申请' : '申请失败'), r.ok ? 'info' : 'err');
+    toast(d.message || (r.ok ? '已发送申请' : ('申请失败：' + (d.error || r.status))), r.ok ? 'info' : 'err');
   }catch(_){ toast('申请失败：网络错误', 'err'); }
 }
 async function forceControl(){
+  const port = controlPortOrWarn('强制接管');
+  if (!port) return;
   try{
     const r = await fetch(tk(B + '/force-control'), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId:CID }) });
+      body: JSON.stringify({ clientId: CID, port }) });
     const d = await r.json().catch(() => ({}));
-    if (d.ok) toast('已强制接管控制权', 'ok');
-    else toast(d.error || '强制接管失败', 'err');
-  }catch(_){ toast('强制接管失败：网络错误', 'err'); }
+    if (r.ok && d.ok) toast(d.message || ('已强制接管 ' + port + ' 的控制权'), 'ok');
+    else toast(d.error || ('强制接管失败：HTTP ' + r.status), 'err', 4000);
+  }catch(e){ toast('强制接管失败：' + (e && e.message ? e.message : '网络错误'), 'err'); }
 }
 
 // ============================ 清屏 / 复制 / 保存 ============================
+/** 没内容可复制/保存时就把按钮置灰（同"发送按钮"一类：不让按钮假装可用） */
+function updateLogUI(view){
+  const v = (view && view !== cur) ? null : (view || cur);
+  if (!v) return;
+  const hasText = !!(v.log && v.log.trim());
+  const hasSel = !!(v.term && v.term.getSelection && v.term.getSelection());
+  const has = hasText || hasSel;
+  const c = $('copyBtn'), s = $('saveBtn');
+  if (c){
+    c.disabled = !has;
+    c.title = has ? '复制选中内容（没有选中时复制最近输出）' : '暂无可复制的内容（终端还没有输出，或刚清过屏）';
+  }
+  if (s){
+    s.disabled = !has;
+    s.title = has ? '把本地缓存的输出保存为 .txt' : '暂无可保存的内容（终端还没有输出，或刚清过屏）';
+  }
+}
 function clearScreen(){
-  if (T) T.clear();
-  log = '';
+  if (cur.term){
+    // xterm 的 clear() 只清回滚区、"光标所在行"会保留，所以必须再显式清屏 + 光标归位：
+    //   \x1b[2J 清屏、\x1b[3J 清回滚区、\x1b[H 光标回左上角
+    cur.term.clear();
+    cur.term.write('\x1b[2J\x1b[3J\x1b[H');
+  }
+  cur.log = '';
+  updateLogUI(cur);
   toast('已清屏（服务端缓冲区未动）', 'ok');
 }
+/** 按需把服务端环形缓冲区里的历史补到终端：新窗口默认是空的，这是唯一的"倒回历史"入口 */
+function loadHistory(){
+  const v = cur;
+  if (!v || !v.connected){ toast('请先连接串口', 'warn'); return; }
+  const before = v.log.length;
+  v.term.write('\r\n\x1b[36m===== 载入服务端缓冲历史 =====\x1b[0m\r\n');
+  // 显式关掉再建：connectWS 有"端口没变就不重建"的幂等守卫（防自激重连），
+  // 不先关掉的话这条带 replay 的连接根本建不起来。
+  closeWS(v);
+  connectWS(v, true, { replay: true });   // 只有这一次连接会让服务端补发历史
+  toast('正在载入服务端缓冲区历史…', 'info', 1800);
+  setTimeout(() => {
+    const got = Math.max(0, v.log.length - before);
+    toast(got ? ('已载入约 ' + fmtBytes(got) + ' 历史（附在当前内容之后）')
+              : '服务端缓冲区里没有可载入的历史', got ? 'ok' : 'warn', got ? 4000 : 3000);
+  }, 1200);
+}
 async function copyText(){
-  let s = (T && T.getSelection()) || '';
+  let s = (cur.term && cur.term.getSelection()) || '';
   const fromSelection = !!s;
-  if (!s) s = log.slice(-(1 << 15));
+  if (!s) s = cur.log.slice(-(1 << 15));
   if (!s){ toast('没有可复制的内容', 'warn'); return; }
   let ok = false;
   try{
@@ -763,20 +1232,269 @@ async function copyText(){
   else toast('复制失败：浏览器拒绝了剪贴板访问', 'err', 3500);
 }
 function saveText(){
-  if (!log){ toast('没有可保存的内容', 'warn'); return; }
+  if (!cur.log){ toast('没有可保存的内容', 'warn'); return; }
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([log], { type:'text/plain' }));
+  a.href = URL.createObjectURL(new Blob([cur.log], { type:'text/plain' }));
   a.download = 'serial-' + new Date().toISOString().slice(0, 19).replace(/[:]/g, '-') + '.txt';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  toast('已保存 ' + log.length + ' 字符', 'ok');
+  toast('已保存 ' + cur.log.length + ' 字符', 'ok');
+}
+
+// ============================ 固件文件体检（bin / Intel HEX / Motorola SREC） ============================
+// 只做"只读识别 + 提示"，不改发送路径：serial_send_file 依旧是原始字节直写。
+const FW_MAX_PARSE = 8 * 1024 * 1024;   // 超过只做头部判定（几 MB 文本全量解析会明显卡界面）
+
+/** 合并地址区间（相邻/重叠并起来），顺带数出空洞 */
+function mergeRanges(list){
+  const out = [];
+  for (const r of list.slice().sort((a, b) => a.start - b.start)){
+    const last = out[out.length - 1];
+    if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else out.push({ start: r.start, end: r.end });
+  }
+  const gaps = [];
+  for (let i = 1; i < out.length; i++) gaps.push({ start: out[i - 1].end, end: out[i].start });
+  return { ranges: out, gaps };
+}
+/** 头部嗅探：`:` 开头 → Intel HEX；`S<数字><两位长度>` → SREC；不可打印字节多 → bin */
+function sniffFirmware(head){
+  const s = String(head || '').replace(/^\uFEFF/, '').replace(/^[\s\r\n]+/, '');
+  if (!s.trim()) return 'empty';
+  if (s[0] === ':') return 'hex';
+  if (/^S[0-9][0-9A-Fa-f]{2}$/.test(s.slice(0, 4))) return 'srec';
+  let printable = 0;
+  const n = Math.min(256, s.length);
+  for (let i = 0; i < n; i++){
+    const c = s.charCodeAt(i);
+    if (c === 9 || c === 10 || c === 13 || (c >= 32 && c !== 0xFFFD)) printable++;
+  }
+  return printable / Math.max(n, 1) > 0.9 ? 'text' : 'bin';
+}
+/** Intel HEX：校验和（各位相加 ≡ 0 mod 256）、记录类型 00–05、扩展地址拼 32 位 */
+function analyzeHexText(text){
+  const ranges = [], errors = [], warnings = [];
+  const lines = text.split(/\r?\n/);
+  let base = 0, bytes = 0, entry = null, records = 0, sawEof = false;
+  for (let i = 0; i < lines.length; i++){
+    const raw = lines[i].trim();
+    if (!raw) continue;
+    const no = i + 1;
+    if (raw[0] !== ':'){ errors.push('第 ' + no + ' 行不是以 : 开头'); continue; }
+    const hx = raw.slice(1);
+    if (hx.length % 2 || !/^[0-9A-Fa-f]+$/.test(hx)){ errors.push('第 ' + no + ' 行不是合法十六进制'); continue; }
+    const b = [];
+    for (let k = 0; k < hx.length; k += 2) b.push(parseInt(hx.substr(k, 2), 16));
+    const len = b[0], type = b[3];
+    if (b.length !== len + 5){ errors.push('第 ' + no + ' 行长度字段与实际字节数不符'); continue; }
+    let sum = 0; for (const x of b) sum = (sum + x) & 0xff;
+    if (sum !== 0){ errors.push('第 ' + no + ' 行校验和错误'); continue; }
+    const addr = (b[1] << 8) | b[2];
+    const data = b.slice(4, 4 + len);
+    if (type === 0x00){
+      records++; bytes += len;
+      if (len) ranges.push({ start: (base + addr) >>> 0, end: (base + addr + len) >>> 0 });
+      else warnings.push('第 ' + no + ' 行是空数据记录');
+    }else if (type === 0x01){ sawEof = true; }
+    else if (type === 0x02){ base = ((((b[4] << 8) | b[5]) * 16)) >>> 0; }
+    else if (type === 0x03){ entry = (((((b[4] << 8) | b[5]) << 4) + ((b[6] << 8) | b[7])) >>> 0); }
+    else if (type === 0x04){ base = ((((b[4] << 8) | b[5]) * 0x10000)) >>> 0; }
+    else if (type === 0x05){ entry = (((((b[4] << 8) | b[5]) << 16) | ((b[6] << 8) | b[7])) >>> 0); }
+    else warnings.push('第 ' + no + ' 行记录类型 ' + type + ' 不常见');
+  }
+  if (!records) errors.push('没有任何数据记录');
+  if (records && !sawEof) warnings.push('缺少文件结束记录（:00000001FF）');
+  return { bytes, entry, records, errors, warnings, ranges, addrWidth: null };
+}
+/** Motorola SREC：LL = 地址字节 + 数据 + 校验；S1/S2/S3 地址宽度；S7/S8/S9 入口 */
+function analyzeSrecText(text){
+  const ranges = [], errors = [], warnings = [];
+  const lines = text.split(/\r?\n/);
+  let bytes = 0, entry = null, records = 0, addrWidth = null, declared = null, sawEnd = false;
+  for (let i = 0; i < lines.length; i++){
+    const raw = lines[i].trim();
+    if (!raw) continue;
+    const no = i + 1;
+    if (raw[0] !== 'S'){ errors.push('第 ' + no + ' 行不是以 S 开头'); continue; }
+    const t = raw[1];
+    if (!/[0-9]/.test(t)){ errors.push('第 ' + no + ' 行记录类型非法（S' + t + '）'); continue; }
+    if (t === '4'){ errors.push('第 ' + no + ' 行是保留类型 S4'); continue; }
+    const body = raw.slice(2);
+    if (!body.length || body.length % 2 || !/^[0-9A-Fa-f]+$/.test(body)){ errors.push('第 ' + no + ' 行不是合法十六进制'); continue; }
+    const b = [];
+    for (let k = 0; k < body.length; k += 2) b.push(parseInt(body.substr(k, 2), 16));
+    if (b.length !== b[0] + 1){ errors.push('第 ' + no + ' 行长度字段与实际字节数不符'); continue; }
+    let sum = 0; for (let k = 0; k < b.length - 1; k++) sum += b[k];
+    if (((~sum) & 0xff) !== b[b.length - 1]){ errors.push('第 ' + no + ' 行校验和错误'); continue; }
+    const aLen = (t === '1' || t === '5' || t === '9') ? 2 : (t === '2' || t === '6' || t === '8') ? 3 : 4;
+    let addr = 0;
+    for (let k = 1; k < 1 + aLen; k++) addr = ((addr * 256) + b[k]) >>> 0;
+    const data = b.slice(1 + aLen, b.length - 1);
+    if (t === '1' || t === '2' || t === '3'){
+      records++;
+      const w = aLen * 8;
+      if (addrWidth === null) addrWidth = w;
+      else if (addrWidth !== w) warnings.push('地址宽度混用（既有 ' + addrWidth + ' 位、也有 ' + w + ' 位地址）');
+      bytes += data.length;
+      if (data.length) ranges.push({ start: addr, end: (addr + data.length) >>> 0 });
+      else warnings.push('第 ' + no + ' 行是空数据记录');
+    }else if (t === '5' || t === '6'){ declared = addr; }
+    else if (t === '7' || t === '8' || t === '9'){ entry = addr; sawEnd = true; }
+    // S0 是文件头（厂商/文件名），忽略
+  }
+  if (!records) errors.push('没有任何数据记录');
+  if (records && !sawEnd) warnings.push('缺少结束记录（S7/S8/S9）');
+  if (declared !== null && declared !== records) warnings.push('计数记录写 ' + declared + ' 条，实际 ' + records + ' 条数据记录');
+  return { bytes, entry, records, errors, warnings, ranges, addrWidth };
+}
+function fmtHexAddr(n){ return '0x' + (n >>> 0).toString(16).toUpperCase().padStart(8, '0'); }
+/** 文本 → 报告（纯函数，测试直接喂字符串；不碰 DOM） */
+function inspectFirmwareText(text){
+  const kind = sniffFirmware(String(text).slice(0, 4096));
+  if (kind !== 'hex' && kind !== 'srec'){
+    return { kind, bytes: null, entry: null, records: null, errors: [], warnings: [], ranges: [], gaps: [], addrWidth: null };
+  }
+  const raw = kind === 'hex' ? analyzeHexText(text) : analyzeSrecText(text);
+  const m = mergeRanges(raw.ranges);
+  return Object.assign({ kind, parsed: true }, raw, { ranges: m.ranges, gaps: m.gaps });
+}
+/** 文件 → 报告：bin 只看大小；文本格式且 ≤8 MB 才全量解析 */
+function inspectFile(file){
+  return new Promise(resolve => {
+    const bin = (kind) => resolve({ kind, name: file.name, size: file.size, bytes: kind === 'empty' ? 0 : file.size,
+      entry: null, records: null, errors: [], warnings: [], ranges: [], gaps: [], addrWidth: null });
+    try{
+      const fr = new FileReader();
+      fr.onerror = () => bin('bin');
+      fr.onload = () => {
+        const kind = sniffFirmware(String(fr.result || ''));
+        if (kind !== 'hex' && kind !== 'srec') return bin(kind);
+        if (file.size > FW_MAX_PARSE){
+          return resolve({ kind, name: file.name, size: file.size, bytes: null, entry: null, records: null,
+            errors: [], addrWidth: null, ranges: [], gaps: [],
+            warnings: ['文件超过 ' + Math.round(FW_MAX_PARSE / 1048576) + ' MB，只做了头部判定（未做完整地址/校验检查）'] });
+        }
+        const fr2 = new FileReader();
+        fr2.onerror = () => bin('bin');
+        fr2.onload = () => {
+          const rep = inspectFirmwareText(String(fr2.result || ''));
+          rep.name = file.name; rep.size = file.size;
+          resolve(rep);
+        };
+        fr2.readAsText(file);
+      };
+      fr.readAsText(file.slice(0, 4096));
+    }catch(_){ bin('bin'); }
+  });
+}
+/** 把体检结果画到侧栏（严重错误红、告警黄、正常绿） */
+let lastFirmwareReport = null;
+function renderFirmwareInfo(rep){
+  lastFirmwareReport = rep;
+  const el = $('fwInfo');
+  if (!rep){ el.hidden = true; el.textContent = ''; return; }
+  const kindLabel = rep.kind === 'hex' ? 'Intel HEX'
+    : rep.kind === 'srec' ? ('Motorola SREC' + (rep.addrWidth ? '（S' + (rep.addrWidth === 16 ? 1 : rep.addrWidth === 24 ? 2 : 3) + ' · ' + rep.addrWidth + ' 位地址）' : ''))
+    : rep.kind === 'bin' ? '裸二进制'
+    : rep.kind === 'empty' ? '空文件' : '文本（不是 HEX/SREC）';
+  const parts = [kindLabel];
+  if (rep.bytes !== null && rep.bytes !== undefined){
+    parts.push(fmtBytes(rep.bytes) + ' 数据');
+  }
+  if (rep.records) parts.push(rep.records + ' 条记录');
+  if (rep.ranges && rep.ranges.length){
+    const first = rep.ranges[0], last = rep.ranges[rep.ranges.length - 1];
+    parts.push('地址 ' + fmtHexAddr(first.start) + '–' + fmtHexAddr(last.end) + ' · ' + rep.ranges.length + ' 段');
+  }
+  if (rep.entry !== null && rep.entry !== undefined) parts.push('入口 ' + fmtHexAddr(rep.entry));
+  const hasErr = !!(rep.errors && rep.errors.length);
+  if (hasErr) parts.push('校验/格式错误 ' + rep.errors.length + ' 处');
+  else if (rep.kind === 'hex' || rep.kind === 'srec') parts.push('校验通过');
+
+  const lines = [(rep.name || '文件') + ' · ' + parts.join(' · ')];
+  if (hasErr){
+    lines.push(rep.errors.slice(0, 3).join('；') + (rep.errors.length > 3 ? '（还有 ' + (rep.errors.length - 3) + ' 处）' : ''));
+  }
+  if (rep.gaps && rep.gaps.length){
+    lines.push('⚠ 地址不连续：' + rep.gaps.length + ' 处空洞，首个 ' + fmtHexAddr(rep.gaps[0].start) + '–' + fmtHexAddr(rep.gaps[0].end));
+  }
+  for (const w of (rep.warnings || []).slice(0, 3)) lines.push('⚠ ' + w);
+  if (rep.kind === 'bin') lines.push('不含地址信息 —— 烧写地址由板子 / bootloader 决定');
+  if (rep.kind === 'hex' || rep.kind === 'srec') lines.push('文本记录格式：对端 bootloader 逐行解析，建议块间延时 10–50 ms 并留观察时间');
+  if (rep.kind === 'text') lines.push('既不是 Intel HEX 也不是 SREC，将按原始字节原样发送');
+
+  el.className = 'fw-info ' + (hasErr ? 'err' : ((rep.warnings && rep.warnings.length) || (rep.gaps && rep.gaps.length) ? 'warn' : 'ok'));
+  el.textContent = lines.join('\n');
+  el.hidden = false;
+  // 提示块在侧栏靠下的"发送文件"区：窄屏抽屉或侧栏滚动时可能看不见 → 滚到可见 + 发一条摘要 toast
+  try{ el.scrollIntoView({ block: 'nearest' }); }catch(_){}
+  const brief = [rep.name || '文件', kindLabel];
+  if (rep.bytes !== null && rep.bytes !== undefined) brief.push(fmtBytes(rep.bytes) + ' 数据');
+  if (rep.ranges && rep.ranges.length) brief.push(rep.ranges.length + ' 段');
+  if (hasErr) brief.push('✖ ' + rep.errors.length + ' 处校验/格式错误');
+  else if ((rep.gaps && rep.gaps.length) || (rep.warnings && rep.warnings.length)) brief.push('⚠ 有告警（见侧栏）');
+  else if (rep.kind === 'hex' || rep.kind === 'srec') brief.push('校验通过');
+  toast(brief.join(' · '), hasErr ? 'err' : ((rep.gaps && rep.gaps.length) || (rep.warnings && rep.warnings.length)) ? 'warn' : 'ok', hasErr ? 6000 : 4200);
+}
+
+/** 轻量确认框（不用 window.confirm：无样式、会阻塞页面、且无法被自动化脚本点击） */
+let cfResolve = null;
+function askConfirm(title, yesLabel, noLabel, detail){
+  return new Promise(resolve => {
+    cfResolve = resolve;
+    $('cfTitle').textContent = title;
+    $('cfMsg').textContent = detail || '';
+    $('cfYes').textContent = yesLabel || '确定';
+    $('cfNo').textContent = noLabel || '取消';
+    $('ctrlOverlay').classList.add('open');
+    $('confirmBox').classList.add('open');
+    $('cfYes').focus();
+  });
+}
+function cfAnswer(v){
+  $('confirmBox').classList.remove('open');
+  if (!$('ctrlDialog').classList.contains('open')) $('ctrlOverlay').classList.remove('open');
+  const r = cfResolve; cfResolve = null;
+  if (r) r(!!v);
 }
 
 // ============================ 发送文件（原始字节 → 串口） ============================
+/** 发送按钮与同组参数如实反映"这一路现在能不能发"：未连接 / 监视端一律置灰并说明原因 */
+function updateSendUI(view){
+  const v = (view && view !== cur) ? null : (view || cur);   // 这些控件只反映当前操作端口
+  const btn = $('sendFileBtn');
+  if (!btn || !v) return;
+  const st = v.status || {};
+  // 连接状态看两处：视图标记 + 最近一次状态（SSE 里两者更新的先后顺序不固定）
+  const connected = st.connected === true || (v.connected && st.connected !== false);
+  const can = connected && !!v.isController;
+  btn.disabled = !can;
+  btn.title = !connected
+    ? '串口未连接：先「连接」并取得控制权后才能发送文件'
+    : (v.isController
+        ? '把本地文件的原始字节直接写入串口（二进制安全，不追加行尾、不等待响应）'
+        : '监视端只读，不能发送数据；需要先「申请控制」或「强制接管」这一路的控制权');
+  // 同一组的参数必须一起置灰：按钮灰着、参数还能改，就是在骗人
+  const why = !connected ? '串口未连接' : '监视端只读（需先取得控制权）';
+  for (const [id, label] of [['chunkKB', '每块字节数'], ['chunkDelay', '块间延时']]){
+    const inp = $(id);
+    if (!inp) continue;
+    inp.disabled = !can;
+    inp.title = can ? (label + '：仅本次发送有效') : (label + '不可改：' + why);
+  }
+  // 「载入历史缓冲」只依赖连接（不看控制权）：断开时也如实置灰
+  const hist = $('histBtn');
+  if (hist){
+    hist.disabled = !connected;
+    hist.title = connected
+      ? '按需载入服务端环形缓冲区里的历史（附在当前内容之后；新窗口默认是空的）'
+      : '串口未连接：先「连接」再载入历史';
+  }
+}
 let sending = false, sendCancelled = false;
 function pickFile(){
-  if (!conn){ toast('请先连接串口', 'warn'); return; }
-  if (!isController){ toast('监视端不能发送数据，请先「申请控制」或「强制接管」', 'warn', 3600); return; }
+  if (!cur.connected){ toast('请先连接串口', 'warn'); return; }
+  if (!cur.isController){ toast('监视端不能发送数据，请先「申请控制」或「强制接管」', 'warn', 3600); return; }
   if (sending){ toast('正在发送中，请等待或先取消', 'warn'); return; }
   $('filePick').click();
 }
@@ -810,7 +1528,9 @@ async function doSendFile(file){
       }
       const slice = file.slice(sent, Math.min(sent + chunkSize, file.size));
       const buf = await slice.arrayBuffer();
-      const r = await fetch(tk(B + '/send-file?clientId=' + encodeURIComponent(CID)),
+      const portParam = (cur.status && cur.status.port) || $('ps').value || '';
+      const r = await fetch(tk(B + '/send-file?clientId=' + encodeURIComponent(CID)
+        + '&port=' + encodeURIComponent(portParam)),
         { method:'POST', headers:{ 'Content-Type':'application/octet-stream' }, body: buf });
       if (!r.ok){
         const d = await r.json().catch(() => ({}));
@@ -827,33 +1547,49 @@ async function doSendFile(file){
     toast('发送失败（已发 ' + fmtBytes(sent) + '）：' + (e && e.message ? e.message : e), 'err', 6000);
   }finally{
     sending = false;
-    $('sendFileBtn').disabled = false;
+    updateSendUI();   // 不能无条件 enable：发送途中若丢了控制权/断开了，按钮必须保持灰着
     setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 4000);
   }
 }
 $('filePick').addEventListener('change', async () => {
   const f = $('filePick').files && $('filePick').files[0];
   $('filePick').value = '';
-  if (f) await doSendFile(f);
+  if (!f) return;
+  // 先体检再发：格式/地址范围/校验一目了然，严重错误必须点一次确认才发
+  const rep = await inspectFile(f);
+  renderFirmwareInfo(rep);
+  if (rep.errors && rep.errors.length){
+    const go = await askConfirm('文件有 ' + rep.errors.length + ' 处校验/格式错误', '仍然发送', '取消发送',
+      f.name + '：' + rep.errors.slice(0, 3).join('；') +
+      (rep.errors.length > 3 ? '（还有 ' + (rep.errors.length - 3) + ' 处）' : '') +
+      '\n\n按原样发送可能被对端 bootloader 拒收，或烧进错误数据。');
+    if (!go){ toast('已取消发送：' + f.name, 'warn', 3000); return; }
+  }
+  await doSendFile(f);
 });
 
 // ============================ 滚动到底部 ============================
 function updateBottomBtn(){
-  if (!T) return;
-  const b = T.buffer.active;
+  if (!cur.term) return;
+  const b = cur.term.buffer.active;
   $('tobottom').style.display = (b.viewportY < b.baseY - 1) ? 'inline-block' : 'none';
 }
 function scrollBottom(){
-  if (!T) return;
-  T.scrollToBottom();
+  if (!cur.term) return;
+  cur.term.scrollToBottom();
   updateBottomBtn();
 }
 
 // ============================ 波特率自定义 ============================
+// 端口下拉变化 → 主按钮在「连接 / 断开 / 切换到 X」之间切换语义（并记住是用户手选的）
+$('ps').addEventListener('change', () => { psUserPicked = true; updateConnectButton(); });
+
 $('bs').addEventListener('change', () => {
+  bsUserPicked = true;
   if ($('bs').value !== 'custom') return;
-  const cur = (statusCache && statusCache.baudRate) || 115200;
-  const v = prompt('自定义波特率（数字）', String(cur));
+  // 注意：变量名不能叫 cur —— 会遮蔽全局的活动视图（曾因机械替换引入该错误）
+  const fallbackBaud = (cur && cur.status && cur.status.baudRate) || 115200;
+  const v = prompt('自定义波特率（数字）', String(fallbackBaud));
   const n = Number(v);
   if (Number.isFinite(n) && n > 0){
     const s = String(Math.floor(n));
@@ -863,7 +1599,7 @@ $('bs').addEventListener('change', () => {
     }
     $('bs').value = s;
   }else{
-    $('bs').value = String(cur);
+    $('bs').value = String(fallbackBaud);
   }
 });
 
@@ -883,67 +1619,86 @@ async function ensureXterm(){
     await loadScript('https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js');
   }
 }
+// ============================ 终端输入 ============================
+/** 把键盘输入送到该端口自己的 WS（P2.1：按视图，天然不会串到别的端口） */
+function sendInput(view, data){
+  if (!view) return;
+  if (view.ws && view.ws.readyState === WebSocket.OPEN){
+    view.ws.send(data);
+    if (view === cur){
+      const d = $('dotWs');
+      d.classList.add('flash');
+      setTimeout(() => d.classList.remove('flash'), 180);
+    }
+  }else if (!view.isController && view.connected){
+    const now = Date.now();
+    if (now - view.lastSendWarn > 4000){
+      view.lastSendWarn = now;
+      toast('监视端不能发送数据，请先申请或强制接管控制权', 'warn', 2600);
+    }
+  }
+}
+
+/** 把占位视图（未连接时用）改挂到真实端口名下：SSE/WS 无需重建，终端历史保留 */
+function adoptPort(view, port){
+  if (!view || view.port === port) return view;
+  views.delete(view.port);
+  view.port = port;
+  view.el.dataset.port = port;
+  views.set(port, view);
+  return view;
+}
+
 async function boot(){
   await ensureXterm();
-  T = new Terminal({
-    fontSize: fontSize,
-    fontFamily: 'Consolas,Monaco,"Cascadia Mono",monospace',
-    cursorBlink: true,
-    scrollback: 5000,
-    theme: { background: THEMES[themeKey].bg, foreground: THEMES[themeKey].fg,
-      cursor: THEMES[themeKey].cursor, selectionBackground: THEMES[themeKey].sel,
-      selectionForeground: '#ffffff' }
-  });
-  T.open($('term'));
+  // 先建"未连接"占位视图（与改造前一致：无端口时也有一块终端显示等待提示）
+  const view = activate('');
   applyTheme();
   fit();
   setTimeout(fit, 80);
   setTimeout(fit, 400);
-  if (window.ResizeObserver) new ResizeObserver(scheduleFit).observe($('term'));
-
-  // Ctrl + 滚轮缩放
-  T.element.addEventListener('wheel', e => {
-    if (e.ctrlKey){ e.preventDefault(); bumpFont(e.deltaY > 0 ? -1 : 1); }
-  }, { passive: false });
-
-  T.onData(data => {
-    if (ws && ws.readyState === WebSocket.OPEN){
-      ws.send(data);
-      const d = $('dotWs');
-      d.classList.add('flash');
-      setTimeout(() => d.classList.remove('flash'), 180);
-    }else if (!isController && conn){
-      const now = Date.now();
-      if (now - lastSendWarn > 4000){
-        lastSendWarn = now;
-        toast('监视端不能发送数据，请先申请或强制接管控制权', 'warn', 2600);
-      }
-    }
-  });
-  T.onScroll(updateBottomBtn);
-  T.focus();
+  view.term.focus();
 
   await rp();
-  connectSSE();
+  // 先问清状态再建通道：否则会"占位视图先连一条不带 port 的 WS，认领端口后又重建一条"（白建一条）
+  let status = null;
   try{
     const r = await fetch(tk(B + '/status'));
-    const s = await r.json();
-    renderStatus(s);
-    if (s.connected){
-      conn = true;
-      $('cb').textContent = '断开'; $('cb').className = 'danger';
-      $('ctrlSec').hidden = false; $('statsSec').hidden = false;
-      updateCtrlUI(s.controllerClientId);
-      connectWS();
-      startPolling();
-    }else{
-      setBadge('', '未连接', '串口未打开');
-      T.write('等待连接…\r\n');
-    }
-  }catch(_){
-    T.write('等待连接…\r\n');
+    status = await r.json();
+  }catch(_){}
+  if (status){
+    renderStatus(view, status);
+    if (status.connected) adoptPort(view, status.port || '');
   }
-  setDot('dotWs', ws ? 'warn' : '', '终端通道（WebSocket）未连接');
+  connectSSE(view);            // 此时端口已知 → SSE/WS 都带 port，一次到位
+  lastAudience = (status && status.audience) || lastAudience;
+
+  if (status && status.connected){
+    view.connected = true;
+    updateConnectButton();
+    $('ctrlSec').hidden = false; $('statsSec').hidden = false;
+    updateCtrlUI(view, status.controllerClientId);
+    connectWS(view);
+  }else{
+    setBadge('', '未连接', '串口未打开');
+    view.term.write('等待连接…\r\n');
+  }
+  updateSendUI(view);                    // 启动时就如实反映：未连接 → 发送按钮置灰
+  updateLogUI(view);                     // 还没有任何输出 → 复制/保存日志置灰
+  // 先读"上次停留的操作端口"，再决定要不要兜底 —— 读晚了会被兜底自动接上的那一路盖掉
+  const saved = savedActivePort();
+  startPolling();                        // 常驻心跳：统计 + 发现别处打开的端口（下拉里打 ● 标记）
+  if (status) reconcilePorts(status, saved);
+  if (saved && saved !== (view.port || '')){
+    if (views.has(saved) && views.get(saved).connected) activate(saved);
+    else if (isRunning(saved)) attachExistingPort(saved);
+    else {
+      // 上次停留的端口现在没在跑：照样停在它上面（显示未连接），开不开由用户点「连接」
+      const v = activate(saved);
+      if (v && !v.status && !v.log) v.term.write('未连接：点「连接」打开 ' + saved + '\r\n');
+    }
+  }
+  setDot('dotWs', view.ws ? 'warn' : '', '终端通道（WebSocket）未连接');
 }
 boot().catch(e => {
   document.body.insertAdjacentHTML('afterbegin',

@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { SerialMonitor } from "../build/serial-monitor.js";
+import { PortRegistry } from "../build/port-registry.js";
 import { startWebServer } from "../build/web-server.js";
 
 const PORT_MIN = 9722;
@@ -30,9 +30,9 @@ function occupyFreePort(from, to) {
 }
 
 function startServer(port) {
-  const monitor = new SerialMonitor(1024);
+  const registry = new PortRegistry(1024);
   let actualPort = null;
-  const server = startWebServer(port, monitor, false, undefined, undefined, (p) => { actualPort = p; });
+  const server = startWebServer(port, registry, false, undefined, undefined, (p) => { actualPort = p; });
   return { server, getActual: () => actualPort };
 }
 
