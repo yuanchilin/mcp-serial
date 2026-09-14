@@ -1,0 +1,85 @@
+# ============================================================================
+# Release — 把当前版本打成 .tgz 挂到 GitHub Release（不依赖 npm 凭据）
+# 触发：推 v* tag，或手动 Run workflow
+#
+# 为什么需要它：npm 侧发布需要账号凭据（Trusted Publishing 或 token），
+#   而账号当前卡在 WebAuthn 安全密钥验证上（必须本人在设备上完成）。
+#   本工作流只用仓库自带的 GITHUB_TOKEN，因此**不需要任何个人凭据、不碰 2FA**，
+#   产出一个可直接安装的产物：
+#     npm i -g https://github.com/yuanchilin/mcp-serial/releases/download/v<版本>/yuanchilin-mcp-serial-<版本>.tgz
+#   npm 官方发布见 publish.yml（凭据恢复后手动触发）。
+# ============================================================================
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 建 Release / 传附件
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 版本与 tag 校验
+        id: guard
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            T="${GITHUB_REF_NAME#v}"
+            if [ "$T" != "$V" ]; then
+              echo "::error::tag v$T 与 package.json 的 $V 不一致，中止"
+              exit 1
+            fi
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "将要发布 v$V"
+
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 安装 chromium（端到端用）
+        run: npx playwright install --with-deps chromium
+
+      - name: 单元测试
+        run: npm test
+      - name: 启动自检（断言版本号）
+        run: npm run smoke
+      - name: 端到端（A + D）
+        run: npm run test:ui
+      - name: 针对性检查
+        run: npm run test:checks
+
+      - name: 打包（npm pack）
+        id: pack
+        run: |
+          npm run build
+          TGZ=$(npm pack --silent)
+          echo "tgz=$TGZ" >> "$GITHUB_OUTPUT"
+          echo "产物：$TGZ"
+          tar -tzf "$TGZ" | sed 's/^/  /'
+
+      - name: 建/更新 GitHub Release（附 .tgz，幂等）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.guard.outputs.version }}"
+          TGZ="${{ steps.pack.outputs.tgz }}"
+          NOTES="安装：\`npm i -g https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/${TGZ}\`"
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "Release v$V 已存在 → 覆盖附件"
+            gh release upload "v$V" "$TGZ" --clobber
+            gh release edit "v$V" --notes "$NOTES"
+          elif git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            gh release create "v$V" --title "v$V" --notes "$NOTES" --generate-notes "$TGZ"
+          else
+            gh release create "v$V" --title "v$V" --notes "$NOTES" --generate-notes --target "$GITHUB_SHA" "$TGZ"
+          fi

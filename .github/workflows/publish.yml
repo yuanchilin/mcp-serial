@@ -1,30 +1,87 @@
+# ============================================================================
+# CD — 发布到 npm 官方 registry（**手动触发**）
+#   触发：Actions → Publish npm → Run workflow（dist-tag 填 latest）
+#
+# 为什么现在只保留手动触发：npm 账号当前卡在 WebAuthn 安全密钥二次验证上
+#   （必须本人在设备上按 PIN/指纹，任何自动化都替代不了），既配不了 Trusted Publisher
+#   也建不了新 token。若 tag 触发保留着，每次打 tag 都会红一条 —— 所以：
+#   日常发布走 release.yml（GitHub Release + .tgz，不需要个人凭据）；
+#   npm 凭据恢复后（配好 Trusted Publisher，或换成能用的 granular token），
+#   把下面的 `push: tags` 触发器加回来即可恢复"打 tag 即发 npm"。
+#
+# 闸门（任一条不过就中止，绝不在没验过的情况下发布）：
+#   1. tag 名去掉 v 必须与 package.json 的 version 完全一致（tag 触发时）
+#   2. 该版本在 npm 上不能已存在
+#   3. 单元测试 + 启动自检（含版本号断言）+ 端到端 A/D 段 + 针对性检查全绿
+# 认证：**npm Trusted Publishing（OIDC）**，不使用长期 token（无 NODE_AUTH_TOKEN，
+#   改用 id-token）。前提：包 @yuanchilin/mcp-serial → Settings → Trusted Publisher →
+#   GitHub Actions：owner=yuanchilin、repository=mcp-serial、workflow filename=publish.yml。
+#   注意：trusted publishing 要求 npm CLI ≥ 11.5，故发布前显式升级 npm。
+# 失败史：2.6.0 首次 tag 发布报 `E404 PUT .../@yuanchilin%2fmcp-serial` ——
+#   那是 NPM_TOKEN（classic token）已失效/无该 scope 写权限（npm 对 scoped 包把 403 伪装成 404），
+#   与 `--provenance` 无关。
+# ============================================================================
 name: Publish npm
+
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: npm dist-tag
+        description: npm dist-tag（正式版填 latest）
         required: true
+        default: latest
+
+permissions:
+  contents: read    # 仅 checkout；Release 由 release.yml 负责
+  id-token: write   # npm Trusted Publishing / provenance 需要 OIDC
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - run: npm test
-      - name: Check version not published
+          cache: npm
+
+      - name: 发布前闸门（tag 与版本一致 / 版本未被占用）
+        id: guard
         run: |
           V=$(node -p "require('./package.json').version")
-          if npm view @yuanchilin/mcp-serial@${V} version --registry https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "版本 ${V} 已发布过，中止"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            T="${GITHUB_REF_NAME#v}"
+            if [ "$T" != "$V" ]; then
+              echo "::error::tag v$T 与 package.json 的 $V 不一致，中止"
+              exit 1
+            fi
+          fi
+          if npm view "@yuanchilin/mcp-serial@$V" version >/dev/null 2>&1; then
+            echo "::error::版本 $V 在 npm 上已存在，中止"
             exit 1
           fi
-          echo "版本 ${V} 可发布"
-      - run: npm publish --registry https://registry.npmjs.org --tag ${{ inputs.tag }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=${{ inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+          echo "将要发布 @yuanchilin/mcp-serial@$V（dist-tag: ${{ inputs.tag || 'latest' }}）"
+
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 安装 chromium（端到端用）
+        run: npx playwright install --with-deps chromium
+
+      - name: 单元测试
+        run: npm test
+      - name: 启动自检（断言版本号）
+        run: npm run smoke
+      - name: 端到端（A + D）
+        run: npm run test:ui
+      - name: 针对性检查
+        run: npm run test:checks
+
+      - name: 升级 npm（Trusted Publishing 要求 npm CLI ≥ 11.5）
+        run: npm install -g npm@latest && npm --version
+
+      - name: 发布到 npm（Trusted Publishing / OIDC，无需 token）
+        run: npm publish --registry https://registry.npmjs.org --tag "${{ steps.guard.outputs.dist_tag }}" --provenance
+

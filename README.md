@@ -171,10 +171,49 @@ src/
 
 | 命令 | 说明 |
 |---|---|
-| `npm run build` | 编译 TypeScript |
+| `npm run build` | 编译 TypeScript（并把 xterm 与 `viewer.html` 复制进 `build/`） |
 | `npm start` | 启动编译后的服务器 |
+| `npm test` | 单元测试（`node --test`，会先自动 build） |
+| `npm run smoke` | 启动自检：真起一次进程，断言启动横幅里的版本 == `package.json` 版本 |
+| `npm run test:ui` | 端到端 UI：A（布局/主题/单实例）+ D（假串口/WS/多路），用 chromium |
+| `npm run test:ui:all` | 端到端全套（**含 B 段**：探测本机 `127.0.0.1:9721` 正在运行的实例，只能在你的机器上跑） |
+| `npm run test:checks` | 针对性检查：端口切换/角色/F5/清屏回放 + 固件体检 |
+| `npm run test:all` | 上面能自动跑的全跑一遍（不含 B 段） |
 | `npm run watch` | 监听模式自动重编译 |
 | `npm run inspector` | 使用 MCP Inspector 调试 |
+
+端到端 UI 需要 Playwright 的浏览器：CI 用自带的 chromium（`npx playwright install chromium`）；
+本机想用系统 Edge 就设环境变量 `UI_BROWSER=msedge`。
+
+## CI / 发布
+
+| 流程 | 触发 | 做什么 |
+|---|---|---|
+| `CI` | push / PR（任何分支） | 单元测试（Node **20 / 22 / 24** 矩阵 + Windows 一份）、启动自检、端到端 UI（A+D 段）与针对性检查 |
+| `Release` | 推 `v*` tag，或手动 Run workflow | 版本/tag 校验 → 全量检查全绿 → `npm pack` → 建 GitHub Release 并把 `.tgz` 作为附件（**不依赖任何 npm 凭据**） |
+| `Publish npm` | **手动** Run workflow（当前暂停 tag 触发） | 同上检查 → `npm publish`（Trusted Publishing + provenance） |
+
+发布分两条通道，因为 npm 侧的授权可能被账号安全设置卡住：
+
+```bash
+# ① 打 tag → GitHub Release（附可直接安装的 .tgz），不需要个人凭据
+git tag v2.6.1 && git push origin v2.6.1
+npm i -g https://github.com/yuanchilin/mcp-serial/releases/download/v2.6.1/yuanchilin-mcp-serial-2.6.1.tgz
+
+# ② npm 官方（需要 npm 账号授权，见下）—— 目前手动触发
+#    Actions → Publish npm → Run workflow（dist-tag 填 latest）
+```
+
+> **npm 官方发布的授权前提**（二选一，都需要在 npmjs.com 上操作，且账号若开了 2FA 需通过验证）：
+> - **Trusted Publishing（推荐，无需长期 token）**：包 `@yuanchilin/mcp-serial` → Settings → Trusted Publisher → GitHub Actions，
+>   owner `yuanchilin`、repository `mcp-serial`、workflow filename `publish.yml`；
+>   或在 npm 侧建 **granular access token**（勾 write + 选该包 + 允许绕过 2FA）后更新仓库 secret `NPM_TOKEN`。
+> - 完成后再把 `publish.yml` 的 `push: tags` 触发器加回来，"打 tag 即发 npm"就恢复了。
+> - 现状备注：该账号当前卡在 WebAuthn 安全密钥二次验证（需本人在设备上按 PIN/指纹），
+>   因此日常发布走通道 ①；`publish.yml` 暂时不随 tag 触发，避免每次打 tag 都红一条。
+
+> CI 里的端到端**不跑 B 段**（B 段是"探测本机正在运行的实例"，CI 没有这个对象）；
+> 本机验收请用 `npm run test:ui:all`，它包含 B 段。
 
 ## 许可证
 

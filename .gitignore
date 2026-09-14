@@ -1,9 +1,10 @@
 node_modules/
 build/
-package-lock.json
 *.env
 .npmrc
 
 # 测试产物, 不进库
 test-results/
 playwright-report/
+test/ui/.fixtures/
+test/ui/.tmp-private-ports.json
