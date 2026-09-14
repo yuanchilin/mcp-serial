@@ -171,10 +171,38 @@ src/
 
 | 命令 | 说明 |
 |---|---|
-| `npm run build` | 编译 TypeScript |
+| `npm run build` | 编译 TypeScript（并把 xterm 与 `viewer.html` 复制进 `build/`） |
 | `npm start` | 启动编译后的服务器 |
+| `npm test` | 单元测试（`node --test`，会先自动 build） |
+| `npm run smoke` | 启动自检：真起一次进程，断言启动横幅里的版本 == `package.json` 版本 |
+| `npm run test:ui` | 端到端 UI：A（布局/主题/单实例）+ D（假串口/WS/多路），用 chromium |
+| `npm run test:ui:all` | 端到端全套（**含 B 段**：探测本机 `127.0.0.1:9721` 正在运行的实例，只能在你的机器上跑） |
+| `npm run test:checks` | 针对性检查：端口切换/角色/F5/清屏回放 + 固件体检 |
+| `npm run test:all` | 上面能自动跑的全跑一遍（不含 B 段） |
 | `npm run watch` | 监听模式自动重编译 |
 | `npm run inspector` | 使用 MCP Inspector 调试 |
+
+端到端 UI 需要 Playwright 的浏览器：CI 用自带的 chromium（`npx playwright install chromium`）；
+本机想用系统 Edge 就设环境变量 `UI_BROWSER=msedge`。
+
+## CI / 发布
+
+| 流程 | 触发 | 做什么 |
+|---|---|---|
+| `CI` | push / PR（任何分支） | 单元测试（Node **20 / 22 / 24** 矩阵 + Windows 一份）、启动自检、端到端 UI（A+D 段）与针对性检查 |
+| `Publish npm` | 推 `v*` tag，或手动 Run workflow | 版本闸门（tag 与 `package.json` 一致、该版本未被占用）→ 全量检查全绿 → `npm publish`（带 provenance）→ 建 GitHub Release |
+
+正式发布：
+
+```bash
+# 版本号只在 package.json 一处
+npm version 2.6.1 --no-git-tag-version   # 或手改 package.json
+git commit -am "chore: 2.6.1"
+git tag v2.6.1 && git push origin v2.6.1 # 推 tag 即触发发布
+```
+
+> CI 里的端到端**不跑 B 段**（B 段是"探测本机正在运行的实例"，CI 没有这个对象）；
+> 本机验收请用 `npm run test:ui:all`，它包含 B 段。
 
 ## 许可证
 

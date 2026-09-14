@@ -1,10 +1,32 @@
+# ============================================================================
+# CD — 发布到 npm（打 tag 即发布）
+#   正式发布：git tag v2.6.0 && git push origin v2.6.0
+#   手动发布/重跑：Actions → Publish npm → Run workflow（填 dist-tag）
+#
+# 闸门（任一条不过就中止，绝不在没验过的情况下发布）：
+#   1. tag 名去掉 v 必须与 package.json 的 version 完全一致
+#   2. 该版本在 npm 上不能已存在
+#   3. 单元测试 + 启动自检（含版本号断言）+ 端到端 A/D 段 + 针对性检查全绿
+# 发布后自动建 GitHub Release（用 runner 自带的 gh，不引第三方 action）。
+# 备注：`--provenance` 需要公开仓库 + id-token；若将来仓库转私有，去掉该 flag 即可。
+# ============================================================================
 name: Publish npm
+
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: npm dist-tag
+        description: npm dist-tag（正式版填 latest）
         required: true
+        default: latest
+
+permissions:
+  contents: write   # 创建 GitHub Release
+  id-token: write   # npm provenance 存证
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -14,17 +36,48 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - run: npm test
-      - name: Check version not published
+          cache: npm
+
+      - name: 发布前闸门（tag 与版本一致 / 版本未被占用）
+        id: guard
         run: |
           V=$(node -p "require('./package.json').version")
-          if npm view @yuanchilin/mcp-serial@${V} version --registry https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "版本 ${V} 已发布过，中止"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            T="${GITHUB_REF_NAME#v}"
+            if [ "$T" != "$V" ]; then
+              echo "::error::tag v$T 与 package.json 的 $V 不一致，中止"
+              exit 1
+            fi
+          fi
+          if npm view "@yuanchilin/mcp-serial@$V" version >/dev/null 2>&1; then
+            echo "::error::版本 $V 在 npm 上已存在，中止"
             exit 1
           fi
-          echo "版本 ${V} 可发布"
-      - run: npm publish --registry https://registry.npmjs.org --tag ${{ inputs.tag }}
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=${{ inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+          echo "将要发布 @yuanchilin/mcp-serial@$V（dist-tag: ${{ inputs.tag || 'latest' }}）"
+
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 安装 chromium（端到端用）
+        run: npx playwright install --with-deps chromium
+
+      - name: 单元测试
+        run: npm test
+      - name: 启动自检（断言版本号）
+        run: npm run smoke
+      - name: 端到端（A + D）
+        run: npm run test:ui
+      - name: 针对性检查
+        run: npm run test:checks
+
+      - name: 发布到 npm（带 provenance）
+        run: npm publish --registry https://registry.npmjs.org --tag "${{ steps.guard.outputs.dist_tag }}" --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 创建 GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,6 +1,6 @@
 {
   "name": "@yuanchilin/mcp-serial",
-  "version": "2.4.4",
+  "version": "2.6.0",
   "description": "MCP Serial Terminal server for MoterSoc - persistent serial port communication with Web monitor",
   "private": false,
   "type": "module",
@@ -15,7 +15,13 @@
     "start": "node build/index.js",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
+    "smoke": "node test/smoke-boot.mjs",
+    "pretest:ui": "npm run build",
+    "test:ui": "node test/ui/verify.mjs --only=A,D",
+    "test:ui:all": "node test/ui/verify.mjs",
+    "test:checks": "node test/ui/check-fixes.mjs && node test/ui/check-firmware.mjs",
+    "test:all": "npm test && npm run smoke && npm run test:ui && npm run test:checks",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
@@ -30,6 +36,7 @@
     "@types/node": "^20.11.24",
     "@types/ws": "^8.18.1",
     "@xterm/xterm": "^5.5.0",
+    "playwright": "^1.63.0",
     "typescript": "^5.3.3"
   },
   "repository": {
@@ -40,6 +47,6 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

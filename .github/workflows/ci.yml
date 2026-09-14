@@ -1,7 +1,14 @@
 # ============================================================================
-# CI — 所有分支通用：构建 + 测试
+# CI — 构建 + 单元测试 + 启动自检 + 端到端 UI（chromium）
 # 触发：push / pull_request（任何分支）
-# 平台：GitHub Actions (ubuntu)
+#
+# 覆盖说明（不含"默认跳过"的项）：
+#   · 单元测试：三个 Node 版本（20/22/24，>=20 是本项目的硬要求）+ Windows 一份
+#   · 启动自检：真的起一次 build/index.js，断言启动横幅里的版本 == package.json 版本
+#   · 端到端 UI：verify.mjs 的 A(布局/主题/单实例) + D(假串口/WS/多路) 两段，
+#     外加 check-fixes（端口切换/角色/清屏回放）与 check-firmware（固件体检）
+#   · **B 段（探测本机 127.0.0.1:9721 正在运行的实例）在 CI 里没有对象，按设计排除**，
+#     它属于本机验收：`node test/ui/verify.mjs --only=B`
 # ============================================================================
 name: CI
 
@@ -9,30 +16,60 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  build-test:
-    name: build + test (Node ${{ matrix.node }})
+  unit:
+    name: 单元测试 (Node ${{ matrix.node }} / ubuntu)
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22, 24]   # engines >=18；含最新 LTS 24（本机实际版本）
+        node: [20, 22, 24]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
+          cache: npm
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 单元测试（pretest 会先 build）
         run: npm test
+      - name: 启动自检（断言版本号）
+        run: npm run smoke
 
-      - name: Verify web-server boot output (smoke)
-        run: |
-          timeout 5 node build/index.js 2>&1 | head -20 || true
+  unit-windows:
+    name: 单元测试 (Node 22 / windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 单元测试
+        run: npm test
+      - name: 启动自检
+        run: npm run smoke
+
+  ui:
+    name: 端到端 UI (chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: 安装依赖（按 lockfile）
+        run: npm ci --no-audit --no-fund
+      - name: 安装 chromium
+        run: npx playwright install --with-deps chromium
+      - name: 端到端（A 布局/主题 + D 假串口/WS/多路）
+        run: npm run test:ui
+      - name: 针对性检查（端口切换/角色/清屏回放 + 固件体检）
+        run: npm run test:checks
