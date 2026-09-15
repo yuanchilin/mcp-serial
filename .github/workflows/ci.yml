@@ -6,7 +6,8 @@
 #   · 单元测试：三个 Node 版本（20/22/24，>=20 是本项目的硬要求）+ Windows 一份
 #   · 启动自检：真的起一次 build/index.js，断言启动横幅里的版本 == package.json 版本
 #   · 端到端 UI：verify.mjs 的 A(布局/主题/单实例) + D(假串口/WS/多路) 两段，
-#     外加 check-fixes（端口切换/角色/清屏回放）与 check-firmware（固件体检）
+#     外加 check-fixes（端口切换/角色/清屏回放）、check-firmware（固件体检）
+#     与 check-xmodem（假板子按 XMODEM 收，含一直等 / 立刻取消 / 传输中 409）
 #   · **B 段（探测本机 127.0.0.1:9721 正在运行的实例）在 CI 里没有对象，按设计排除**，
 #     它属于本机验收：`node test/ui/verify.mjs --only=B`
 # ============================================================================
@@ -71,5 +72,5 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: 端到端（A 布局/主题 + D 假串口/WS/多路）
         run: npm run test:ui
-      - name: 针对性检查（端口切换/角色/清屏回放 + 固件体检）
+      - name: 针对性检查（端口切换/角色/清屏回放 + 固件体检 + XMODEM）
         run: npm run test:checks

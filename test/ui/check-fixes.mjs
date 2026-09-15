@@ -102,11 +102,16 @@ try {
     kb: document.getElementById('chunkKB').disabled,
     delay: document.getElementById('chunkDelay').disabled,
     kbTitle: document.getElementById('chunkKB').title,
+    xd: document.getElementById('xdBtn').disabled,
+    cancel: document.getElementById('cancelSendBtn').disabled,
+    cancelTitle: document.getElementById('cancelSendBtn').title,
   }));
   const sendMon = await sendState(B);
-  ok('④ 监视端：发送按钮 + 分块/延时参数一起置灰，并说明原因',
+  ok('④ 监视端：发送/分块/延时/XMODEM/取消 全部置灰，并说明原因',
     sendMon.btn === true && sendMon.kb === true && sendMon.delay === true
-    && /监视端/.test(sendMon.btnTitle) && /监视端/.test(sendMon.kbTitle), JSON.stringify(sendMon));
+    && sendMon.xd === true && sendMon.cancel === true
+    && /监视端/.test(sendMon.btnTitle) && /监视端/.test(sendMon.kbTitle) && /监视端/.test(sendMon.cancelTitle),
+    JSON.stringify(sendMon));
 
   await B.evaluate(() => window.forceControl());   // 多路并存时强制接管（原 bug：400）
   await wait(1500);
@@ -118,8 +123,9 @@ try {
     JSON.stringify({ ctrl: String(ctrlAfterForce).slice(0, 8), mine: String(cidB).slice(0, 8), badge: b2.badge, toast: bToast }));
 
   const sendCtrl = await sendState(B);
-  ok('④ 接管成功后：发送按钮与参数一起恢复可用',
-    sendCtrl.btn === false && sendCtrl.kb === false && sendCtrl.delay === false, JSON.stringify(sendCtrl));
+  ok('④ 接管成功后：发送/参数/取消 一起恢复可用',
+    sendCtrl.btn === false && sendCtrl.kb === false && sendCtrl.delay === false && sendCtrl.cancel === false,
+    JSON.stringify(sendCtrl));
 
   // 申请控制：B 在 COM-ECHO 上是监视端（A 是控制端），申请后由 A 同意
   await pick(A, 'COM-ECHO');                  // A 保持在 COM-ECHO（控制端）
@@ -178,7 +184,8 @@ try {
   await wait(1600);
   const sendOff = await sendState(A);
   ok('④ 断开后：按钮与参数一起置灰并说明"未连接"',
-    sendOff.btn === true && sendOff.kb === true && sendOff.delay === true && /未连接/.test(sendOff.btnTitle),
+    sendOff.btn === true && sendOff.kb === true && sendOff.delay === true && sendOff.cancel === true
+    && /未连接/.test(sendOff.btnTitle),
     JSON.stringify(sendOff));
 
   await A.close();
@@ -224,6 +231,50 @@ try {
   ok('⑤ 清屏后刷新：历史不会又冒出来（服务端缓冲仍在）',
     afterReload.logHas === false && afterReload.logLen === 0 && afterReload.connected === true && bufAfter > 0,
     JSON.stringify({ ui: afterReload, 缓冲字节: bufAfter }));
+
+  // ---------- ⑥ 「仅本机可见」可以在【连接之前】就设好 ----------
+  const privList = async () => (await (await fetch(`${base}/privacy`)).json()).private;
+  const privUi = (pg) => pg.evaluate(() => ({
+    shown: !document.getElementById('privacySec').hidden,
+    port: document.getElementById('privPort').textContent.trim(),
+    checked: document.getElementById('privChk').checked,
+    disabled: document.getElementById('privChk').disabled,
+    note: document.getElementById('privNote').textContent,
+  }));
+  await C.evaluate(() => {
+    const sel = document.getElementById('ps');
+    if (![...sel.options].some(o => o.value === 'COM-UNOPENED')) {
+      const o = document.createElement('option');
+      o.value = 'COM-UNOPENED'; o.dataset.base = 'COM-UNOPENED'; o.textContent = 'COM-UNOPENED';
+      sel.appendChild(o);
+    }
+  });
+  await pick(C, 'COM-UNOPENED');            // 选一个【没打开】的端口
+  await wait(1800);
+  const u1 = await privUi(C);
+  ok('⑥ 未连接的端口也显示「可见性」且可编辑（不要求先连接/控制权）',
+    u1.shown === true && u1.port === '· COM-UNOPENED' && u1.disabled === false
+    && u1.checked === false && /还没打开/.test(u1.note) && !(await privList()).includes('COM-UNOPENED'),
+    JSON.stringify({ ui: u1, server: await privList() }));
+
+  await C.evaluate(() => window.togglePrivacy(true));   // 连接之前就设成"仅本机可见"
+  await wait(1200);
+  const p1 = await privList();
+  ok('⑥ 连接之前就能成功设成「仅本机可见」（服务端已记录）',
+    p1.includes('COM-UNOPENED'), JSON.stringify(p1));
+
+  await pick(C, 'COM-ECHO');                // 切走再切回：状态应能从服务端读回来
+  await wait(1600);
+  await pick(C, 'COM-UNOPENED');
+  await wait(1800);
+  const u2 = await privUi(C);
+  ok('⑥ 切走再切回：未连接端口的勾选状态仍在（从服务端读回）',
+    u2.checked === true && u2.disabled === false, JSON.stringify(u2));
+
+  await C.evaluate(() => window.togglePrivacy(false));
+  await wait(1200);
+  const p2 = await privList();
+  ok('⑥ 取消后恢复对远程可见', p2.includes('COM-UNOPENED') === false, JSON.stringify(p2));
 
   await C.close();
 } finally {

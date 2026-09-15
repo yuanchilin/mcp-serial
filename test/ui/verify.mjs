@@ -216,6 +216,88 @@ if (!LIVE_ONLY && want('A')) {
   ok('A 有输出后「复制 / 保存日志」自动恢复可用',
     withOutput.copy === false && withOutput.save === false, JSON.stringify(withOutput));
 
+  // ---- 设置面板宽度：可拖拽 / 越界夹取 / 记忆 / 双击复位 ----
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.waitForTimeout(300);
+  const panelW = () => page.evaluate(() => ({
+    sb: Math.round(document.getElementById('sidebar').getBoundingClientRect().width),
+    saved: localStorage.getItem('sidebarWidth'),
+    term: document.getElementById('term').clientWidth,
+    aria: document.getElementById('sbResize').getAttribute('aria-valuenow'),
+  }));
+  const dragTo = async (x) => {
+    const from = await page.evaluate(() => Math.round(document.getElementById('sbResize').getBoundingClientRect().left + 3));
+    await page.mouse.move(from, 320);
+    await page.mouse.down();
+    await page.mouse.move(x, 320, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(260);
+  };
+  const wStart = await panelW();
+  await dragTo(340);
+  const wDrag = await panelW();
+  ok('A 设置面板可拖拽调宽（终端同步变窄 + 宽度被记住）',
+    wDrag.sb === 340 && wDrag.saved === '340' && wDrag.term < wStart.term && wDrag.aria === '340',
+    JSON.stringify({ start: wStart, drag: wDrag }));
+  await dragTo(60);
+  const wMin = await panelW();
+  await dragTo(3000);
+  const wMax = await panelW();
+  const cap = Math.min(560, Math.floor(1280 * 0.5));
+  ok('A 拖拽越界被夹住（下限 200 / 上限 min(560px, 50vw)）',
+    wMin.sb === 200 && wMax.sb === cap, JSON.stringify({ min: wMin.sb, max: wMax.sb, cap }));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForTimeout(1400);
+  const wReload = await panelW();
+  ok('A 刷新后仍保持面板宽度', wReload.sb === cap, JSON.stringify(wReload));
+  await page.evaluate(() => document.getElementById('sbResize').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+  await page.waitForTimeout(260);
+  const wReset = await panelW();
+  ok('A 双击拖拽条复位到默认 236px', wReset.sb === 236, JSON.stringify(wReset));
+
+  // ---- 面板拉到很窄时不许溢出：行要换行、按钮要收得回、不越出卡片 ----
+  await dragTo(200);
+  await page.waitForTimeout(320);
+  const tight = await page.evaluate(() => {
+    const sb = document.getElementById('sidebar');
+    const cardOvf = [...document.querySelectorAll('#sidebar .sec')]
+      .map((c) => ({ t: ((c.querySelector('h2') || {}).textContent || '').trim(), ovf: c.scrollWidth - c.clientWidth }))
+      .filter((x) => x.ovf > 1);
+    const outside = [...document.querySelectorAll('#sidebar button')]
+      .filter((b) => b.offsetParent !== null && b.closest('.sec'))
+      .filter((b) => b.getBoundingClientRect().right > b.closest('.sec').getBoundingClientRect().right + 1)
+      .map((b) => (b.textContent || '').trim());
+    const save = document.getElementById('saveBtn').getBoundingClientRect();
+    const hist = document.getElementById('histBtn').getBoundingClientRect();
+    return {
+      sbOvf: sb.scrollWidth - sb.clientWidth,
+      cardOvf,
+      outside,
+      wrapped: Math.abs(save.top - hist.top) > 2,
+      panel: Math.round(sb.getBoundingClientRect().width),
+    };
+  });
+  ok('A 面板拉到最小 200px：侧栏与卡片无横向溢出、按钮不出卡片边界',
+    tight.sbOvf <= 1 && tight.cardOvf.length === 0 && tight.outside.length === 0,
+    JSON.stringify(tight));
+  ok('A 面板很窄时按钮行自动换行（不再硬挤成一行）', tight.wrapped === true, JSON.stringify({ wrapped: tight.wrapped, panel: tight.panel }));
+  await dragTo(236);
+  await page.waitForTimeout(240);
+  // 宽面板要用起来：「操作」卡的按钮应自动并成一行（窄了再换行）
+  await dragTo(560);
+  await page.waitForTimeout(320);
+  const wideRow = await page.evaluate(() => {
+    const ids = ['copyBtn', 'saveBtn', 'histBtn'];
+    const tops = ids.map((i) => Math.round(document.getElementById(i).getBoundingClientRect().top));
+    const first = document.querySelector('#sidebar .grid button');
+    const cnt = document.querySelectorAll('#sidebar .grid button').length;
+    return { tops, 同行: Math.max(...tops) - Math.min(...tops) < 3, 按钮数: cnt, 首按钮top: Math.round(first.getBoundingClientRect().top) };
+  });
+  ok('A 面板拉到最大时「操作」四个按钮并成一行（自适应网格）',
+    wideRow.按钮数 === 4 && wideRow.同行 === true, JSON.stringify(wideRow));
+  await dragTo(236);
+  await page.waitForTimeout(240);
+
   // ---- 宽屏侧栏收起（含刷新后保持） ----
   await page.waitForTimeout(200);
   const navBefore = await page.evaluate(() => ({ hidden: !document.getElementById('sidebar').offsetParent, termW: document.getElementById('term').clientWidth }));
@@ -242,16 +324,18 @@ if (!LIVE_ONLY && want('A')) {
     const v = (k) => cs.getPropertyValue(k).trim();
     return { panel: v('--panel'), text: v('--text'), muted: v('--muted'), tbg: v('--t-bg'),
       sidebarBg: getComputedStyle(document.getElementById('sidebar')).backgroundColor,
+      cardBg: getComputedStyle(document.querySelector('#sidebar .sec')).backgroundColor,
       bodyBg: getComputedStyle(document.body).backgroundColor,
       mainBg: getComputedStyle(document.getElementById('main')).backgroundColor,
       xtermThemeBg: (typeof cur !== 'undefined' && cur && cur.term) ? cur.term.options.theme.background : null,
       hintColor: getComputedStyle(document.querySelector('.hint')).color };
   });
-  ok('A 亮色主题：界面与终端都变亮', lm.panel === '#ffffff' && lm.tbg === '#ffffff'
-    && lm.sidebarBg === 'rgb(255, 255, 255)' && lm.bodyBg === 'rgb(246, 248, 250)'
+  ok('A 亮色主题：界面与终端都变亮（侧栏底色 + 白色卡片）', lm.panel === '#ffffff' && lm.tbg === '#ffffff'
+    && lm.sidebarBg === 'rgb(246, 248, 250)' && lm.cardBg === 'rgb(255, 255, 255)'
+    && lm.bodyBg === 'rgb(246, 248, 250)'
     && lm.mainBg === 'rgb(255, 255, 255)' && lm.xtermThemeBg === '#ffffff',
     JSON.stringify(lm));
-  const cLight = contrast(lm.hintColor, lm.sidebarBg);
+  const cLight = contrast(lm.hintColor, lm.cardBg);   // 说明文字实际坐在卡片上
   ok('A 亮色主题 次级文字对比度 ≥4.5:1', cLight >= 4.5, cLight.toFixed(2) + ':1');
   await page.screenshot({ path: 'test-results/ui/new-light.png' });
   await page.selectOption('#theme', 'dark');
@@ -383,16 +467,29 @@ if (want('B')) {
     await page.waitForTimeout(500);
     const guard = await page.evaluate(() => [...document.querySelectorAll('.toast')].map(t => t.textContent).join(' | '));
     ok(`${tag} 监视端点「发送文件」被前端拦截并提示`, guard.includes('监视端不能发送数据'), guard || 'none');
+    // 同时按钮要如实置灰（不能"看起来能用"）
+    const monBtn = await page.evaluate(() => ({ disabled: document.getElementById('sendFileBtn').disabled, title: document.getElementById('sendFileBtn').title }));
+    ok(`${tag} 监视端：「发送文件」按钮置灰且说明原因`, monBtn.disabled === true && /监视端/.test(monBtn.title), JSON.stringify(monBtn));
   } else {
-    // 是控制端：断言正向行为（发送文件可用），而不是跳过
+    // 页面当前是什么角色，按钮就该是什么状态：能发才亮（未连接 / 监视端一律灰）
     await page.setViewportSize({ width: 1400, height: 820 });
     await page.waitForTimeout(200);
-    const ctrlUi = await page.evaluate(() => ({
-      sendFileDisabled: document.getElementById('sendFileBtn').disabled,
-      privVisible: !document.getElementById('privacySec').hidden,
-      privDisabled: document.getElementById('privChk').disabled,
-    }));
-    ok(`${tag} 控制端时「发送文件」可用`, ctrlUi.sendFileDisabled === false, JSON.stringify(ctrlUi));
+    const ctrlUi = await page.evaluate(() => {
+      const c = (typeof cur !== 'undefined' && cur) ? cur : null;
+      const b = document.getElementById('sendFileBtn');
+      return {
+        sendFileDisabled: b.disabled,
+        sendFileTitle: b.title,
+        connected: !!(c && c.connected),
+        isCtrl: !!(c && c.isController),
+        xdDisabled: document.getElementById('xdBtn').disabled,
+        privVisible: !document.getElementById('privacySec').hidden,
+        privDisabled: document.getElementById('privChk').disabled,
+      };
+    });
+    ok(`${tag} 「发送文件」/ XMODEM 按钮的可用性与角色一致（能发才亮；未连接或监视端置灰）`,
+      ctrlUi.sendFileDisabled === !(ctrlUi.connected && ctrlUi.isCtrl) && ctrlUi.xdDisabled === ctrlUi.sendFileDisabled,
+      JSON.stringify(ctrlUi));
   }
   await page.close();
 }

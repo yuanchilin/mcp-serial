@@ -269,6 +269,54 @@ export function createMCPServer(reg: PortRegistry, version: string, opts: { audi
   );
 
   server.registerTool(
+    "serial_xmodem_send",
+    {
+      description: "用 **XMODEM** 协议把本地文件发给设备（发送方向，适合只吃 XMODEM 的 bootloader）。变体：`auto`（由对端握手字符决定：'C'=CRC、NAK=校验和）、`crc`、`checksum`、`1k`。逐块等 ACK，超时/NAK 自动重传（1K 连续被拒会自动退回 128 字节块）；同一端口同时只允许一个传输，传输期间普通发送会被拒绝（409）。返回成功与否、字节数、重传次数与吞吐。多路时必须显式指定 port。",
+      inputSchema: z.object({
+        port: z.string().optional().describe(PORT_HINT),
+        path: z.string().describe("要发送的文件路径（绝对路径，或相对服务器进程当前目录）"),
+        mode: z.enum(["auto", "crc", "checksum", "1k"]).optional().describe("默认 auto"),
+        timeoutMs: z.number().optional().describe("每块等应答的超时（毫秒），默认 3000"),
+        handshakeMs: z.number().optional().describe("等对端握手字符的超时（毫秒），默认 10000；传 0 = 一直等"),
+        maxRetries: z.number().optional().describe("每块重试上限，默认 10；传 0 = 不限次数（一直等到回应或取消）"),
+        padByte: z.number().optional().describe("末块补位字节，默认 26（0x1A）"),
+      }),
+    },
+    async ({ port, path: filePath, mode, timeoutMs, handshakeMs, maxRetries, padByte }) => {
+      const target = resolveTarget(port);
+      if (!target.ok) return { content: [{ type: "text", text: `❌ ${target.error}` }], isError: true };
+      const file = String(filePath || "");
+      if (!file) return { content: [{ type: "text", text: "path 不能为空" }], isError: true };
+      try {
+        const buf = await readFile(file);
+        // 注意 0 是合法值（不限次数 / 一直等），不能被当成"没传"
+        const optNum = (v: number | undefined, min: number): number | undefined => {
+          const n = Number(v);
+          return Number.isFinite(n) && n >= min ? n : undefined;
+        };
+        const res = await target.session.xmodemSend(buf, {
+          mode: mode || "auto",
+          label: file,
+          timeoutMs: optNum(timeoutMs, 100),
+          handshakeTimeoutMs: optNum(handshakeMs, 0),
+          maxRetries: optNum(maxRetries, 0),
+          padByte: Number.isFinite(Number(padByte)) ? Number(padByte) : undefined,
+        });
+        const head = res.ok ? "✅ XMODEM 发送完成" : "❌ XMODEM 发送失败";
+        const text = `${head}：${target.session.port} (${file})\n`
+          + `模式 ${res.crc ? "CRC16" : "8 位校验和"} · 块长 ${res.blockSize} B · ${res.sentBytes} 字节 · 重传 ${res.retries} 次 · `
+          + `用时 ${(res.elapsedMs / 1000).toFixed(2)} s (${Math.round(res.sentBytes / Math.max(res.elapsedMs / 1000, 1e-3))} B/s)`
+          + (res.error ? `\n原因：${res.error}` : "");
+        return res.ok
+          ? { content: [{ type: "text", text }] }
+          : { content: [{ type: "text", text }], isError: true };
+      } catch (error) {
+        return { content: [{ type: "text", text: `错误: ${errText(error)}` }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
     "serial_send_file",
     {
       description: "把一个**文件**按原始字节写入指定串口（不追加行尾、不等待响应），用于把固件/HEX/SREC 整份镜像推给板子（二进制安全）。可选分块大小与块间延时；返回发送字节数、耗时与吞吐。多路时必须显式指定 port。",

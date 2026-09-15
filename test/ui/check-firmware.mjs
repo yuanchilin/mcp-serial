@@ -167,6 +167,11 @@ try {
     /裸二进制/.test(i2.text) && /不含地址信息/.test(i2.text) && !/Intel HEX/.test(i2.text), i2.text.split('\n')[0]);
 
   // ---------- 严重错误：发送前必须确认一次 ----------
+  // 先冲掉暂存的"半个 UTF-8 字节"：上面的 firmware.bin 是二进制，末尾可能留下不完整序列，
+  // 环形缓冲区按解码后的字符数记账、会把那半个字节推到下一块解出来 —— 用一段纯 ASCII 冲掉，
+  // 下面的字节数断言才能精确成立（这是缓冲区记账特性，不是发送多发了字节）。
+  await fetch(`http://127.0.0.1:${PORT + 1}/emit?port=COM-ECHO&text=FLUSH`, { method: 'POST' });
+  await p.waitForTimeout(600);
   const beforeBad = await recvBytes();
   await p.setInputFiles('#filePick', `${FIX}/bad-cksum.hex`);
   await p.waitForTimeout(1200);

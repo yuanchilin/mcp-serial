@@ -9,6 +9,7 @@ import { WebSocketServer } from "ws";
 import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { SerialMonitor } from "./serial-monitor.js";
+import type { XmodemMode } from "./xmodem.js";
 import { PortRegistry, type Audience } from "./port-registry.js";
 import { getViewerHTML } from "./viewer-html.js";
 import { SerialPort } from "serialport";
@@ -474,6 +475,18 @@ export function startWebServer(
       return;
     }
 
+    // POST /xmodem-send — 用 XMODEM 协议把整份文件发给设备（仅控制端；同一端口串行）
+    if (req.method === "POST" && url.pathname === "/xmodem-send") {
+      handleXmodemSend(req, res, registry, url, audience);
+      return;
+    }
+
+    // POST /xmodem-cancel — 取消进行中的 XMODEM 传输
+    if (req.method === "POST" && url.pathname === "/xmodem-cancel") {
+      handleXmodemCancel(req, res, registry, audience);
+      return;
+    }
+
     // POST /disconnect — Web 终端断开串口（必须指定 port；全关必须显式 all:true）
     if (req.method === "POST" && url.pathname === "/disconnect") {
       handleDisconnect(req, res, registry, audience);
@@ -722,6 +735,73 @@ function handleVendorAsset(res: http.ServerResponse, name: string): void {
   res.end("xterm asset not found");
 }
 
+/** POST /xmodem-send — 用 XMODEM 把请求体（原始字节）发给设备；仅控制端可用，同一端口串行 */
+async function handleXmodemSend(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  registry: PortRegistry,
+  url: URL,
+  audience: Audience
+): Promise<void> {
+  try {
+    const clientId = url.searchParams.get("clientId") || "";
+    const session = resolveSessionOrFail(registry, url.searchParams.get("port"), res, audience);
+    if (!session) return;
+    const permErr = checkController(session, clientId);
+    if (permErr) throw new HttpError(403, permErr);
+    if (session.isXferActive()) throw new HttpError(409, `串口 ${session.port} 正在 XMODEM 传输中`);
+
+    const modeRaw = (url.searchParams.get("mode") || "auto").toLowerCase();
+    const mode = (["auto", "crc", "checksum", "1k"].includes(modeRaw) ? modeRaw : "auto") as XmodemMode;
+    const num = (key: string, def: number, min: number, max: number): number => {
+      const raw = url.searchParams.get(key);
+      if (raw === null || raw === "") return def;
+      const v = Number(raw);
+      // 0 是合法值：对 retries/handshakeMs 表示"不限次数 / 一直等"
+      return Number.isFinite(v) && v >= min && v <= max ? v : def;
+    };
+    const label = url.searchParams.get("label") || "";
+
+    // 整份文件一次收下：引擎要知道总长才能算块数/进度与末块补位
+    const data = await readRawBytes(req, 16 * 1024 * 1024);
+    if (data.length === 0) throw new HttpError(400, "空请求体");
+    session.touchClient(clientId);
+    const result = await session.xmodemSend(data, {
+      mode,
+      label,
+      timeoutMs: num("timeoutMs", 3000, 100, 60000),
+      handshakeTimeoutMs: num("handshakeMs", 10000, 0, 3600000),   // 0 = 一直等
+      maxRetries: num("retries", 10, 0, 100000),                   // 0 = 不限次数
+      padByte: num("pad", 0x1a, 0, 255),
+    });
+    res.writeHead(result.ok ? 200 : 502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ...result, port: session.port, label }));
+  } catch (err) {
+    sendError(res, err);
+  }
+}
+
+/** POST /xmodem-cancel — 取消该端口正在进行的 XMODEM 传输 */
+async function handleXmodemCancel(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  registry: PortRegistry,
+  audience: Audience
+): Promise<void> {
+  try {
+    const body = await parseBody<{ port?: string; clientId?: string }>(req);
+    const session = resolveSessionOrFail(registry, body.port, res, audience);
+    if (!session) return;
+    const permErr = checkController(session, body.clientId);
+    if (permErr) throw new HttpError(403, permErr);
+    const cancelled = session.cancelXfer();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, cancelled, port: session.port }));
+  } catch (err) {
+    sendError(res, err);
+  }
+}
+
 /** POST /send-file?clientId=xxx — 把请求体原始字节写入串口（二进制安全，不追加行尾、不等响应）
  *  前端按块上传（默认 16KB/块），避免超大请求体；仅控制端可用。 */
 async function handleSendFile(
@@ -739,6 +819,10 @@ async function handleSendFile(
     // 权限前置：非控制端直接拒绝（不注册幽灵客户端，也不产生副作用）
     const permErr = checkController(session, clientId);
     if (permErr) throw new HttpError(403, permErr);
+    // XMODEM 传输期间禁止普通写：两条字节流混在一起，两边都会坏
+    if (session.isXferActive()) {
+      throw new HttpError(409, `串口 ${session.port} 正在 XMODEM 传输中，普通发送已暂停（可先取消传输）`);
+    }
     // 体量上限要在串口状态之前判定，否则超大块永远拿不到 413
     const Data = await readRawBytes(req);
     if (Data.length === 0) throw new HttpError(400, "空请求体");

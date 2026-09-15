@@ -3,6 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { SerialPort } from "serialport";
 import type { ServerResponse } from "http";
 import type { WebSocket } from "ws";
+import { XmodemSender, type XmodemIO, type XmodemOptions, type XmodemResult } from "./xmodem.js";
 
 // ============================================================================
 // SSE 客户端信息
@@ -62,6 +63,10 @@ export class SerialMonitor {
   private sendQueue: Promise<void> = Promise.resolve();
   /** 跨 chunk 边界暂存的未完成 UTF-8 字节，拼接到下个 chunk */
   private pendingBytes: Buffer = Buffer.alloc(0);
+  /** XMODEM 传输期间的"原始字节接收口"：进来的字节会同时喂给它（不影响缓冲区/终端显示） */
+  private xferSink: ((b: Buffer) => void) | null = null;
+  /** 正在进行的 XMODEM 传输（用于并发保护与取消） */
+  private xferAbort: AbortController | null = null;
 
   constructor(bufferMaxSize: number) {
     this.buffer = new RingBuffer(bufferMaxSize);
@@ -98,9 +103,32 @@ export class SerialMonitor {
     return this.controllerClientId === clientId;
   }
 
+  /**
+   * 串口收到数据的**唯一入口**（真实串口与测试夹具共用同一条路径）：
+   *   ① 先喂 XMODEM 协议引擎（用未经 UTF-8 拼接的原始字节，控制字节不能被丢/延迟）
+   *   ② 再做 UTF-8 拼接 → 写环形缓冲区 → 广播 SSE / WS
+   */
+  ingest(data: Buffer): void {
+    if (this.xferSink) {
+      try {
+        this.xferSink(data);
+      } catch {
+        /* 协议侧的问题不能影响正常收数据 */
+      }
+    }
+    const merged = this.pendingBytes.length > 0 ? Buffer.concat([this.pendingBytes, data]) : data;
+    const { complete, incomplete } = splitCompleteUTF8(merged);
+    this.pendingBytes = incomplete;
+    if (complete.length > 0) {
+      const text = complete.toString("utf-8");
+      this.buffer.append(text);
+      this.broadcastSSE(text);
+      this.broadcastWS(complete); /* 包含跨 chunk 拼接后的完整 UTF-8 字节 */
+    }
+  }
+
   /** 打开串口并开始监听 */
-  async start(port: string, baudRate: number): Promise<void> {
-    if (this.isActive()) {
+  async start(port: string, baudRate: number): Promise<void> {    if (this.isActive()) {
       await this.stop();
     }
 
@@ -111,23 +139,7 @@ export class SerialMonitor {
         autoOpen: false,
       });
 
-      sp.on("data", (data: Buffer) => {
-        // 拼接上次未完成的 UTF-8 字节
-        const merged = this.pendingBytes.length > 0
-          ? Buffer.concat([this.pendingBytes, data])
-          : data;
-
-        // 分离完整序列和末尾不完整字节
-        const { complete, incomplete } = splitCompleteUTF8(merged);
-        this.pendingBytes = incomplete;
-
-        if (complete.length > 0) {
-          const text = complete.toString("utf-8");
-          this.buffer.append(text);
-          this.broadcastSSE(text);
-          this.broadcastWS(complete);  /* 包含跨 chunk 拼接后的完整 UTF-8 字节 */
-        }
-      });
+      sp.on("data", (data: Buffer) => this.ingest(data));
 
       sp.on("error", (err: Error) => {
         console.error(`[SerialMonitor] 串口错误: ${err.message}`);
@@ -643,6 +655,117 @@ export class SerialMonitor {
       } catch {
         // dead client
       }
+    }
+  }
+
+  /** 广播一条自定义 SSE 事件（例如 XMODEM 的 xfer 进度） */
+  broadcastEvent(event: string, payload: unknown): void {
+    if (this.sseClients.size === 0) return;
+    const frame = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+    for (const [, client] of this.sseClients) {
+      if (!client.res) continue;
+      try {
+        client.res.write(frame);
+      } catch {
+        // dead client
+      }
+    }
+  }
+
+  // ---- XMODEM 传输（发送方向） ----
+
+  isXferActive(): boolean {
+    return this.xferAbort !== null;
+  }
+
+  /** 取消正在进行的 XMODEM 传输；返回是否真的有传输被取消 */
+  cancelXfer(): boolean {
+    if (!this.xferAbort) return false;
+    this.xferAbort.abort();
+    return true;
+  }
+
+  /** 造一个 XmodemIO：写走真实串口，读走"进来什么给什么"的口子；取消时立刻打断等待 */
+  private makeXmodemIO(ac: AbortController): { io: XmodemIO; dispose: () => void } {
+    const queue: Buffer[] = [];
+    let waiter: ((b: Buffer) => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const wake = (b: Buffer): void => {
+      if (!waiter) return;
+      const w = waiter;
+      waiter = null;
+      if (timer) { clearTimeout(timer); timer = null; }
+      w(b);
+    };
+    const sink = (b: Buffer): void => {
+      if (waiter) wake(b);
+      else queue.push(b);
+    };
+    // 取消时不能让协议引擎枯等到本块的超时（默认 3s）——否则"点取消"要等好几秒才有反应
+    const onAbort = (): void => wake(Buffer.alloc(0));
+    ac.signal.addEventListener("abort", onAbort);
+    this.xferSink = sink;
+    return {
+      io: {
+        write: (buf: Buffer) => this.writeBuffer(buf),
+        read: (timeoutMs: number) =>
+          new Promise<Buffer>((resolve) => {
+            const q = queue.shift();
+            if (q) return resolve(q);
+            waiter = resolve;
+            timer = setTimeout(() => {
+              waiter = null;
+              timer = null;
+              resolve(Buffer.alloc(0));
+            }, timeoutMs);
+          }),
+      },
+      dispose: () => {
+        ac.signal.removeEventListener("abort", onAbort);
+        this.xferSink = null;
+        if (timer) { clearTimeout(timer); timer = null; }
+        waiter = null;
+        queue.length = 0;
+      },
+    };
+  }
+
+  /**
+   * 用 XMODEM 把 data 发给设备（发送方向）。
+   * 并发保护：同一端口同一时刻只允许一个传输 —— 两个传输同时读写同一串口会互相污染。
+   */
+  async xmodemSend(
+    data: Buffer,
+    opts: XmodemOptions & { label?: string } = {}
+  ): Promise<XmodemResult> {
+    if (!this.isActive()) throw new Error("串口未打开");
+    if (this.xferAbort) throw new Error(`串口 ${this.port} 正在 XMODEM 传输中（同一端口不支持并发传输）`);
+    const ac = new AbortController();
+    this.xferAbort = ac;
+    const { io, dispose } = this.makeXmodemIO(ac);
+    this.broadcastEvent("xfer", {
+      state: "start",
+      port: this.port,
+      label: opts.label || "",
+      totalBytes: data.length,
+      mode: opts.mode || "auto",
+      timestamp: Date.now(),
+    });
+    try {
+      const sender = new XmodemSender(io, {
+        ...opts,
+        signal: ac.signal,
+        onProgress: (p) => {
+          this.broadcastEvent("xfer", { state: "progress", port: this.port, timestamp: Date.now(), ...p });
+          opts.onProgress?.(p);
+        },
+      });
+      const res = await sender.send(data);
+      this.broadcastEvent("xfer", { state: res.ok ? "done" : "error", port: this.port, timestamp: Date.now(), ...res });
+      return res;
+    } finally {
+      dispose();
+      this.xferAbort = null;
     }
   }
 

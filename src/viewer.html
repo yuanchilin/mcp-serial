@@ -10,7 +10,7 @@
       onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css'">
 <style>
 :root{
-  --sbw:236px;--top:46px;
+  --sbw:236px;--dwr:286px;--top:46px;
   --bg:#0d1117;--panel:#161b22;--panel-2:#1c2128;--panel-3:#262d36;
   --border:#30363d;--border-strong:#4a5561;
   --text:#e6edf3;--muted:#9aa4b2;--accent:#2f81f7;--accent-hover:#4b93f8;
@@ -37,6 +37,7 @@ body{
 button,select,input{font:inherit;color:var(--text);background:var(--panel-2);
   border:1px solid var(--border);border-radius:6px;height:32px;padding:0 10px;
   cursor:pointer;transition:background .12s,border-color .12s}
+button{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 button:hover,select:hover{background:var(--panel-3);border-color:var(--border-strong)}
 button:active{transform:translateY(1px)}
 button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -71,16 +72,43 @@ label.check input{height:14px}
   border:1px solid var(--border);border-radius:999px;padding:2px 9px;white-space:nowrap}
 
 /* ---------- 侧边栏 ---------- */
-#sidebar{grid-row:2;background:var(--panel);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;gap:15px;padding:13px;overflow-y:auto;min-height:0}
+#sidebar{grid-row:2;background:var(--bg);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;gap:10px;padding:10px;overflow-y:auto;min-height:0}
 #sidebar::-webkit-scrollbar{width:10px}
 #sidebar::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:5px;border:2px solid transparent;background-clip:content-box}
-.sec{display:flex;flex-direction:column;gap:8px}
-.sec>h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;color:var(--muted);text-transform:uppercase}
-.row{display:flex;gap:8px;min-width:0}
+/* 每块功能一张卡片：浅底 + 细边框 + 圆角；标题恢复正常字重（中文下小号大写+字距更难看） */
+.sec{display:flex;flex-direction:column;gap:8px;background:var(--panel);
+  border:1px solid var(--border);border-radius:8px;padding:11px 12px}
+.sec>h2{display:flex;align-items:baseline;gap:6px;font-size:12.5px;font-weight:600;
+  letter-spacing:0;color:var(--text);text-transform:none;flex-wrap:wrap;min-width:0}
+.sec>h2 .sub{font-size:11.5px;font-weight:400;color:var(--muted);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row{display:flex;gap:8px;min-width:0;align-items:flex-end;flex-wrap:wrap}
 .row>*{flex:1 1 0;min-width:0}
-.field{display:flex;flex-direction:column;gap:4px}
+/* 按钮可缩不可胀：既不会被拉成和输入框一样宽，也不会在窄面板里顶出边界（放不下就换行） */
+.row>button{flex:0 1 auto}
+/* 一行里的字段给一个实用最小宽度：面板很窄时它会整块换到下一行，而不是被挤成一条缝 */
+.row>.field{min-width:120px}
+/* 端口下拉别被挤没：太窄时它会带着「刷新」一起换行 */
+#ps{min-width:96px}
+/* 自适应网格：宽面板时自动并成一行，窄了按 2 列 / 1 列换行（不会溢出） */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(76px,1fr));gap:8px}
+button.block{width:100%}
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .field>label{font-size:11px;color:var(--muted)}
+/* 带单位的数字输入：单位贴在输入框内右侧 */
+.unit{position:relative;display:block}
+.unit>input{padding-right:30px}
+.unit::after{content:attr(data-unit);position:absolute;right:9px;top:50%;transform:translateY(-50%);
+  font-size:11px;color:var(--muted);pointer-events:none}
+/* 面板宽度拖拽条：贴在侧栏右缘外侧（避开侧栏自己的滚动条）；
+   宽屏用 --sbw，窄屏抽屉用 --dwr */
+#sbResize{position:fixed;top:var(--top);bottom:0;width:9px;left:calc(var(--sbw) - 1px);
+  cursor:col-resize;z-index:130;background:transparent;border-radius:0 3px 3px 0;transition:background .12s}
+#sbResize:hover,#sbResize:focus-visible,#sbResize.dragging{background:var(--accent);opacity:.5;outline:none}
+body.nav-collapsed #sbResize{display:none}
+body.resizing{user-select:none;cursor:col-resize}
+body.resizing #sidebar{pointer-events:none}
 .stat{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
 .stat b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
 #bar-buf{height:6px;border-radius:3px;background:var(--panel-2);border:1px solid var(--border);overflow:hidden}
@@ -103,7 +131,7 @@ label.check input{height:14px}
 .hint b{color:var(--text);font-weight:600}
 .hint code{font-family:Consolas,monospace;font-size:11px;color:var(--text);
   background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:0 3px}
-.sep{height:1px;background:var(--border);margin:1px 0}
+.sep{display:none}
 
 /* ---------- 终端区 ---------- */
 #main{grid-row:2;grid-column:2;position:relative;min-width:0;min-height:0;background:var(--t-bg)}
@@ -150,11 +178,15 @@ label.check input{height:14px}
 @media (max-width:980px){
   body{grid-template-columns:minmax(0,1fr)}
   #main{grid-column:1}
-  #sidebar{position:fixed;top:var(--top);left:0;bottom:0;width:min(286px,86vw);z-index:120;
+  #sidebar{position:fixed;top:var(--top);left:0;bottom:0;width:min(var(--dwr),92vw);z-index:120;
     transform:translateX(-101%);transition:transform .18s ease;box-shadow:0 0 34px rgba(0,0,0,.55)}
   body.nav-open #sidebar{transform:none}
   #scrim{position:fixed;left:0;right:0;top:var(--top);bottom:0;background:rgba(0,0,0,.5);z-index:110}
   body.nav-open #scrim{display:block}
+  /* 抽屉打开时才能拖宽（关着的时候拖拽条没有意义） */
+  #sbResize{left:calc(min(var(--dwr),92vw) - 1px)}
+  #sbResize{display:none}
+  body.nav-open #sbResize{display:block}
 }
 @media (max-width:620px){
   #brand .t{font-size:0}
@@ -211,19 +243,19 @@ label.check input{height:14px}
         <option value="custom">自定义…</option>
       </select>
     </div>
-    <button id="cb" class="primary" onclick="tc()">连接</button>
+    <button id="cb" class="primary block" onclick="tc()">连接</button>
   </div>
 
   <div class="sep"></div>
 
   <div class="sec" id="privacySec" hidden>
-    <h2>可见性 <span id="privPort" style="color:var(--text);letter-spacing:0;text-transform:none"></span></h2>
+    <h2>可见性 <span class="sub" id="privPort"></span></h2>
     <label class="check" for="privChk">
       <input type="checkbox" id="privChk" onchange="togglePrivacy(this.checked)">
       <span>仅本机可见</span>
     </label>
     <p class="hint" id="privNote"></p>
-    <p class="hint">勾选后：<b>远程客户端看不到也连不上这一路</b>（连列表里都不出现）；本机访问不受影响。<br>开关需要<b>本机控制权</b>；请用 <code>http://127.0.0.1:端口</code> 打开本页（局域网 IP 访问会被当作远程）。</p>
+    <p class="hint">勾选后：<b>远程客户端看不到也连不上这一路</b>（连列表里都不出现）；本机访问不受影响。<br><b>端口没打开也能先设</b>（连接之前就设好，打开后对远程即不可见）；已经打开的那一路则需要<b>本机控制权</b>。<br>请用 <code>http://127.0.0.1:端口</code> 打开本页（局域网 IP 访问会被当作远程）。</p>
   </div>
 
   <div class="sec" id="ctrlSec" hidden>
@@ -237,32 +269,43 @@ label.check input{height:14px}
 
   <div class="sec">
     <h2>操作</h2>
-    <div class="row">
+    <div class="grid">
       <button onclick="clearScreen()" title="只清浏览器显示与本地缓存，不影响服务端缓冲区（服务端请用 MCP 工具 serial_clear_buffer）">清屏</button>
       <button id="copyBtn" onclick="copyText()">复制</button>
+      <button id="saveBtn" onclick="saveText()">保存日志</button>
+      <button id="histBtn" onclick="loadHistory()" title="按需把服务端环形缓冲区里的历史补到终端（新窗口默认是空的）">载入历史</button>
     </div>
-    <button id="saveBtn" onclick="saveText()">保存日志</button>
-    <button id="histBtn" onclick="loadHistory()" title="按需把服务端环形缓冲区里的历史补到终端（新窗口默认是空的）">载入历史缓冲</button>
   </div>
 
   <div class="sec">
     <h2>发送文件</h2>
-    <button id="sendFileBtn" onclick="pickFile()" title="把本地文件的原始字节直接写入串口（二进制安全，不追加行尾、不等待响应）">选择文件并发送…</button>
+    <button id="sendFileBtn" class="block" onclick="pickFile()" title="把本地文件的原始字节直接写入串口（二进制安全，不追加行尾、不等待响应）">选择文件并发送…</button>
     <div class="row">
-      <div class="field"><label for="chunkKB">分块 (KB)</label>
-        <input id="chunkKB" type="number" min="1" max="1024" step="1" value="16" aria-label="每块字节数（KB）"></div>
-      <div class="field"><label for="chunkDelay">块间延时 (ms)</label>
-        <input id="chunkDelay" type="number" min="0" max="5000" step="1" value="0" aria-label="每块之间延时（毫秒）"></div>
+      <div class="field"><label for="chunkKB">分块</label>
+        <div class="unit" data-unit="KB"><input id="chunkKB" type="number" min="1" max="1024" step="1" value="16" aria-label="每块字节数（KB）"></div></div>
+      <div class="field"><label for="chunkDelay">块间延时</label>
+        <div class="unit" data-unit="ms"><input id="chunkDelay" type="number" min="0" max="5000" step="1" value="0" aria-label="每块之间延时（毫秒）"></div></div>
     </div>
+    <div class="field"><label for="xdMode">XMODEM 模式</label>
+      <select id="xdMode" aria-label="XMODEM 模式" title="auto：由对端握手字符决定（'C'=CRC16，NAK=8 位校验和）">
+        <option value="auto">自动（按对端握手）</option>
+        <option value="crc">XMODEM-CRC（128B）</option>
+        <option value="checksum">XMODEM（校验和）</option>
+        <option value="1k">XMODEM-1K（1024B）</option>
+      </select>
+    </div>
+    <label class="check" for="xdWait"><input type="checkbox" id="xdWait" checked>
+      <span>一直等（直到对端回应，或我点取消）</span></label>
+    <button id="xdBtn" class="block" onclick="pickXmodemFile()" title="用 XMODEM 协议发送（逐块等 ACK、超时自动重传；适合只吃 XMODEM 的 bootloader）">XMODEM 发送…</button>
     <input type="file" id="filePick" hidden>
     <div id="fwInfo" class="fw-info" hidden></div>
     <div id="fileProg" hidden>
       <div class="stat"><span id="fileProgName">—</span><b id="fileProgPct">0%</b></div>
       <div id="bar-file"><i id="fileFill"></i></div>
       <div class="stat"><span id="fileProgText">0 B / 0 B</span><b id="fileRate">—</b></div>
-      <button class="danger" onclick="cancelSend()">取消发送</button>
+      <button id="cancelSendBtn" class="danger block" onclick="cancelSend()">取消发送</button>
     </div>
-    <p class="hint">原始字节直写串口，用于灌固件 / HEX / SREC。<br>仅控制端可用；发送大文件请酌情加大块间延时。</p>
+    <p class="hint">原始字节直写串口，用于灌固件 / HEX / SREC。<br>XMODEM：逐块等 ACK、超时/校验错自动重传；同一端口同一时刻只能有一个传输。<br>仅控制端可用；发送大文件请酌情加大块间延时。</p>
   </div>
 
   <div class="sec" id="statsSec" hidden>
@@ -278,12 +321,13 @@ label.check input{height:14px}
   <div class="sec">
     <h2>提示</h2>
     <p class="hint">
-      Ctrl + 滚轮 缩放字号<br>
-      点击终端后可直接键盘输入<br>
-      控制端才能发数据，监视端只读<br>
-      「清屏」不清理服务端缓冲区
+      Ctrl + 滚轮 缩放字号；点击终端后可直接键盘输入<br>
+      控制端才能发数据，监视端只读；「清屏」不清服务端缓冲区<br>
+      面板宽度：拖右缘可调，双击复位
     </p>
   </div>
+  <div id="sbResize" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="拖动调整设置面板宽度（双击复位）" title="拖动调整面板宽度；双击复位"></div>
 </aside>
 <div id="scrim" onclick="toggleNav(false)"></div>
 
@@ -483,7 +527,7 @@ function makeView(port){
     port, el, term,
     ws: null, evtSrc: null, log: '', wsRetry: null, status: null,
     isController: false, connected: false, lastSendWarn: 0,
-    privacyAudience: null, privacyPrivate: false,
+    privacyAudience: null, privacyPrivate: false, privacyLoaded: null,
     /** 当前 WS 是为哪个端口建的（端口没变就不必重建，避免多余连接） */
     wsPort: null,
   };
@@ -521,6 +565,8 @@ function savedActivePort(){ try{ return localStorage.getItem('activePort') || ''
 /** 侧栏跟随活动标签：端口/波特率下拉、统计、可见性、控制权都切到这一路 */
 function syncSidebarFor(view){
   if (!view) return;
+  // 切换端口时进度块不该跟着串台（正在传输时保留）
+  if (!sending) $('fileProg').hidden = true;
   const p = view.port || (view.status && view.status.port) || '';
   if (p && ![...$('ps').options].some(o => o.value === p)){
     const o = document.createElement('option'); o.value = p; o.textContent = p;
@@ -530,9 +576,11 @@ function syncSidebarFor(view){
   resetUserPicks();                                   // 换标签 = 换目标端口，旧的手选作废
   if (view.status) renderStatus(view, view.status);    // 用缓存状态立即重画，不等下一次轮询
   else {
-    // 这一路从没连上过（或已断开且无状态）：不能把上一路的侧栏内容留在屏幕上
-    $('ctrlSec').hidden = true; $('statsSec').hidden = true; $('privacySec').hidden = true;
+    // 这一路从没连上过（或已断开且无状态）：清掉上一路的侧栏内容，
+    // 但"可见性"要留着 —— 未连接也能先把"仅本机可见"设好
+    $('ctrlSec').hidden = true; $('statsSec').hidden = true;
     setBadge('', '未连接', '串口未打开');
+    renderPrivacy(view);
     updateSendUI(view);
     updateLogUI(view);
   }
@@ -584,6 +632,80 @@ if (!isNarrow() && localStorage.getItem('navCollapsed') === '1'){
   document.body.classList.add('nav-collapsed');
   const b = $('navToggle'); if (b) b.setAttribute('aria-expanded', 'false');
 }
+
+// ============================ 设置面板宽度（拖拽 / 记忆） ============================
+// 宽屏改网格列宽 --sbw，窄屏改抽屉宽度 --dwr，两者各自记忆；
+// 越界一律夹在 200 ~ min(560px, 50vw)，拖动过程中让终端跟着重算行列数。
+const SB_MIN = 200, SB_MAX_PX = 560, SB_MAX_FRAC = 0.5, SB_DEFAULT = 236, DWR_DEFAULT = 286;
+const sbNarrow = () => window.matchMedia('(max-width:980px)').matches;
+function sbMaxPx(){ return Math.max(SB_MIN, Math.min(SB_MAX_PX, Math.floor(window.innerWidth * SB_MAX_FRAC))); }
+function sbCurrent(){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(sbNarrow() ? '--dwr' : '--sbw');
+  return parseFloat(v) || (sbNarrow() ? DWR_DEFAULT : SB_DEFAULT);
+}
+function setPanelWidth(px, opts){
+  const o = opts || {};
+  const narrow = o.narrow === undefined ? sbNarrow() : o.narrow;
+  const w = Math.max(SB_MIN, Math.min(sbMaxPx(), Math.round(Number(px) || 0)));
+  document.documentElement.style.setProperty(narrow ? '--dwr' : '--sbw', w + 'px');
+  if (o.save !== false){
+    try{ localStorage.setItem(narrow ? 'drawerWidth' : 'sidebarWidth', String(w)); }catch(_){}
+  }
+  const el = $('sbResize');
+  if (el){
+    el.setAttribute('aria-valuenow', String(w));
+    el.setAttribute('aria-valuemin', String(SB_MIN));
+    el.setAttribute('aria-valuemax', String(sbMaxPx()));
+  }
+  scheduleFit();
+  return w;
+}
+function restorePanelWidth(){
+  try{
+    const sw = Number(localStorage.getItem('sidebarWidth'));
+    if (Number.isFinite(sw) && sw > 0) setPanelWidth(sw, { narrow: false, save: false });
+    const dw = Number(localStorage.getItem('drawerWidth'));
+    if (Number.isFinite(dw) && dw > 0) setPanelWidth(dw, { narrow: true, save: false });
+  }catch(_){}
+}
+function initResizer(){
+  const el = $('sbResize');
+  if (!el) return;
+  let dragging = false;
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    el.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    setTimeout(scheduleFit, 80);
+  };
+  el.addEventListener('pointerdown', ev => {
+    dragging = true;
+    el.classList.add('dragging');
+    document.body.classList.add('resizing');
+    try{ el.setPointerCapture(ev.pointerId); }catch(_){}
+    ev.preventDefault();
+  });
+  el.addEventListener('pointermove', ev => {
+    if (!dragging) return;
+    // 侧栏与抽屉都贴左边缘 → 宽度就是指针的 x
+    setPanelWidth(ev.clientX);
+  });
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+  el.addEventListener('lostpointercapture', stop);
+  el.addEventListener('dblclick', () => setPanelWidth(sbNarrow() ? DWR_DEFAULT : SB_DEFAULT));
+  el.addEventListener('keydown', ev => {
+    const cur = sbCurrent();
+    if (ev.key === 'ArrowLeft'){ setPanelWidth(cur - 16); ev.preventDefault(); }
+    else if (ev.key === 'ArrowRight'){ setPanelWidth(cur + 16); ev.preventDefault(); }
+    else if (ev.key === 'Home'){ setPanelWidth(sbNarrow() ? DWR_DEFAULT : SB_DEFAULT); ev.preventDefault(); }
+  });
+  // 窗口变窄/变宽时 50vw 上限会变 → 重新夹一次（不写记忆）
+  window.addEventListener('resize', () => setPanelWidth(sbCurrent(), { save: false }));
+}
+restorePanelWidth();
+initResizer();
 
 // ============================ 控制权对话框 ============================
 function showCtrlDialog(requesterId, requesterName, port){
@@ -694,33 +816,67 @@ function renderStatus(view, s){
 }
 
 // ============================ 可见性（仅本机可见） ============================
-// 显示条件：必须【本机访问】才显示；可操作条件：还必须持有【该端口的控制权】。
+// 显示条件：本机访问 + 知道端口名（**连接与否都可以**）——
+//   "仅本机可见"是关于这个端口对外暴露的策略，应该在连接之前就能先设好。
+// 可操作条件：
+//   · 端口没打开 → 本机随便设（服务端也只要求本机）
+//   · 端口正在跑 → 必须是这一路的控制端（避免本机监视端改在跑端口的暴露状态）
 // 注意：SSE 的 status 事件不带 audience/private 字段，所以这里要"记住"最近一次明确的值，
 // 否则每次 SSE 推送都会把区块误判成非本机而隐藏（纯前端现象，服务端始终照常拦截）。
-// （这两个值随视图保存：cur.privacyAudience / cur.privacyPrivate，在 makeView 里初始化）
+function activePortName(){
+  const st = (cur && cur.status) || {};
+  return (cur && cur.port) || st.port || $('ps').value || '';
+}
+/** 未连接（或还没拿到状态）的端口：查一次服务端的私有标记；GET /privacy 对远程一律 404 */
+async function loadPrivacyFlag(view, port){
+  if (!view || view.privacyLoaded === port) return;
+  view.privacyLoaded = port;                 // 先占位，避免重复请求
+  try{
+    const r = await fetch(tk(B + '/privacy'));
+    if (r.ok){
+      const d = await r.json();
+      view.privacyAudience = d.audience || 'local';
+      view.privacyPrivate = !!(port && Array.isArray(d.private) && d.private.includes(port));
+    }else{
+      view.privacyAudience = 'remote';       // 远程拿不到这个接口
+      view.privacyPrivate = false;
+    }
+  }catch(_){
+    view.privacyAudience = view.privacyAudience || 'remote';
+  }
+  if (view === cur) renderPrivacy(view);
+}
 function renderPrivacy(view){
   const target = view || cur;
   if (!target) return;
-  const st = target.status || {};
-  const isLocalAudience = target.privacyAudience === 'local';
-  const hasPort = !!st.port;
   if (target !== cur) return;       // 只有活动端口驱动侧栏
-  $('privacySec').hidden = !(isLocalAudience && hasPort);
-  $('privPort').textContent = hasPort ? ('· ' + st.port) : '';
-  if (isLocalAudience && hasPort){
-    $('privChk').checked = target.privacyPrivate;
-    $('privChk').disabled = !target.isController;
-    $('privNote').textContent = target.isController ? '' : '需要本机控制权才能修改（先「申请控制」或「强制接管」）';
-  }
+  const st = target.status || {};
+  const port = target.port || st.port || $('ps').value || '';
+  if (target.privacyAudience === null && port) loadPrivacyFlag(target, port);   // 顺手把受众问清
+  const isLocalAudience = target.privacyAudience === 'local';
+  const show = isLocalAudience && !!port;
+  $('privacySec').hidden = !show;
+  $('privPort').textContent = port ? ('· ' + port) : '';
+  if (!show) return;
+  if (!target.connected && port) loadPrivacyFlag(target, port);
+  const open = !!(target.connected && st.port);
+  const canEdit = open ? !!target.isController : true;
+  $('privChk').checked = !!target.privacyPrivate;
+  $('privChk').disabled = !canEdit;
+  $('privNote').textContent = canEdit
+    ? (open ? '' : '该端口还没打开 —— 现在就设好，打开后对远程即不可见')
+    : '需要本机控制权才能修改（先「申请控制」或「强制接管」）';
 }
 async function togglePrivacy(on){
-  const port = cur.status && cur.status.port;
+  const port = activePortName();
   if (!port){
-    toast('请先选择并连接一个串口', 'warn');
-    $('privChk').checked = false;
+    toast('请先在上面的「端口」里选定一路', 'warn', 3000);
+    $('privChk').checked = !on;
     return;
   }
-  if (!cur.isController){
+  // 只有"正在跑的那一路"才要求控制权；未打开的端口本机可以直接设
+  const open = !!(cur.connected && cur.status && cur.status.port);
+  if (open && !cur.isController){
     toast('需要本机控制权才能修改可见性（先「申请控制」或「强制接管」）', 'warn', 3600);
     $('privChk').checked = !on;
     return;
@@ -734,8 +890,10 @@ async function togglePrivacy(on){
       $('privChk').checked = !on;
       return;
     }
+    cur.privacyPrivate = !!on;                        // 未连接时没有状态可回填，这里直接记住
     toast(on ? `「${port}」已设为仅本机可见（断开 ${d.kicked || 0} 个远程连接）` : `「${port}」已对远程可见`, 'ok', 4000);
-    await refreshStatus();
+    renderPrivacy(cur);
+    if (open) await refreshStatus();
   }catch(e){
     toast('设置失败：' + (e && e.message ? e.message : e), 'err', 4000);
     $('privChk').checked = !on;
@@ -890,6 +1048,17 @@ function connectSSE(view){
     try{
       const d = JSON.parse(e.data);
       updateCtrlUI(view, d.newController);
+    }catch(_){}
+  });
+  // XMODEM 传输进度（服务端推给该端口所有客户端；只由"能发送的那一路"显示）
+  view.evtSrc.addEventListener('xfer', e => {
+    try{
+      const d = JSON.parse(e.data);
+      if (view !== cur) return;
+      // 监视端 / 未连接：不显示发送进度框 —— 它们不能发送，否则别的客户端传输失败/取消后
+      // 这个"失败：…"框会一直留在屏幕上，看着像卡住了
+      if (!(view.connected && view.isController)){ $('fileProg').hidden = true; return; }
+      renderXferProgress(d);
     }catch(_){}
   });
   view.evtSrc.onerror = () => {
@@ -1490,17 +1659,154 @@ function updateSendUI(view){
       ? '按需载入服务端环形缓冲区里的历史（附在当前内容之后；新窗口默认是空的）'
       : '串口未连接：先「连接」再载入历史';
   }
+  // XMODEM 发送与普通发送同权：非控制端/未连接一律置灰（模式选择也一起）
+  const xdBtn = $('xdBtn'), xdSel = $('xdMode');
+  if (xdBtn){
+    xdBtn.disabled = !can;
+    xdBtn.title = can
+      ? '用 XMODEM 协议发送（逐块等 ACK、超时自动重传；适合只吃 XMODEM 的 bootloader）'
+      : (connected ? '监视端只读，不能发送数据；需要先「申请控制」或「强制接管」' : '串口未连接：先「连接」才能发送');
+  }
+  if (xdSel){
+    xdSel.disabled = !can;
+    xdSel.title = can ? 'auto：由对端握手字符决定（\'C\'=CRC16，NAK=8 位校验和）'
+      : (connected ? '监视端不可改：需先取得控制权' : '串口未连接');
+  }
+  const xdWaitEl = $('xdWait');
+  if (xdWaitEl){
+    xdWaitEl.disabled = !can;
+    if (xdWaitEl.parentElement) xdWaitEl.parentElement.title = can
+      ? '勾选：不限重试次数、握手也不超时，一直等到对端回应（或你点「取消发送」）；不勾则握手 10s、每块最多重试 10 次'
+      : (connected ? '监视端不可改：需先取得控制权' : '串口未连接');
+  }
+  // 「取消发送」同样按角色置灰：监视端根本不该能发起传输，也就不该看到能点的取消
+  const cancel = $('cancelSendBtn');
+  if (cancel){
+    cancel.disabled = !can || sendCancelled;
+    cancel.title = can
+      ? '中断当前传输（XMODEM 会立刻停止协议状态机）'
+      : (connected ? '监视端只读：不能发送，也不能取消' : '串口未连接');
+  }
+  // 不能发送的这一路，进度框一律收起（否则别的客户端传输失败时会在监视端留下"失败"框）
+  if (!can) $('fileProg').hidden = true;
 }
 let sending = false, sendCancelled = false;
+let xdPending = false;      // 本次文件选择是否走 XMODEM
+let xdActive = false;       // 当前是否有一个 XMODEM 传输在跑（取消时要通知服务端）
+let currentSendAbort = null; // 普通发送中"正在飞行的那一块请求"，取消时立刻打断
+function xferPort(){ return (cur.status && cur.status.port) || cur.port || $('ps').value || ''; }
 function pickFile(){
   if (!cur.connected){ toast('请先连接串口', 'warn'); return; }
   if (!cur.isController){ toast('监视端不能发送数据，请先「申请控制」或「强制接管」', 'warn', 3600); return; }
   if (sending){ toast('正在发送中，请等待或先取消', 'warn'); return; }
+  xdPending = false;
+  $('filePick').click();
+}
+function pickXmodemFile(){
+  if (!cur.connected){ toast('请先连接串口', 'warn'); return; }
+  if (!cur.isController){ toast('监视端不能发送数据，请先「申请控制」或「强制接管」', 'warn', 3600); return; }
+  if (sending){ toast('正在传输中，请等待或先取消', 'warn'); return; }
+  xdPending = true;
   $('filePick').click();
 }
 function cancelSend(){
-  if (!sending) return;
+  if (!sending){
+    toast('当前没有正在进行的发送', 'info', 1500);
+    return;
+  }
+  if (sendCancelled) return;                 // 防连点
   sendCancelled = true;
+  const btn = $('cancelSendBtn');
+  if (btn){ btn.disabled = true; btn.textContent = '正在取消…'; }
+  // 立刻给反馈（之前只有 XMODEM 分支才提示，普通发送点了像"没反应"）
+  toast(xdActive ? '正在中断 XMODEM 传输…' : '正在停止发送…', 'warn', 2500);
+  // 普通发送：立刻打断正在飞行的那一块；XMODEM：服务端在跑协议，必须显式通知它中断
+  if (xdActive){
+    fetch(tk(B + '/xmodem-cancel'), { method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ port: xferPort(), clientId: CID }) }).catch(() => {});
+  } else if (currentSendAbort){
+    try{ currentSendAbort.abort(); }catch(_){}
+  }
+}
+/** 发送结束后恢复取消按钮（每路发送的 finally 里都会调） */
+function resetCancelBtn(){
+  const btn = $('cancelSendBtn');
+  if (btn){ btn.disabled = false; btn.textContent = '取消发送'; }
+}
+/** XMODEM 进度（由该端口的 SSE xfer 事件驱动） */
+function renderXferProgress(d){
+  if (d.state === 'start'){
+    $('fileProg').hidden = false;
+    $('fileProgName').textContent = (d.label || '文件') + '（XMODEM ' + (d.mode || 'auto') + '）';
+    $('fileProgPct').textContent = '0%';
+    $('fileFill').style.width = '0%';
+    $('fileProgText').textContent = '0 B / ' + fmtBytes(d.totalBytes || 0);
+    $('fileRate').textContent = '等待对端握手…';
+    return;
+  }
+  if (d.state === 'progress'){
+    const pct = d.totalBytes ? (d.sentBytes / d.totalBytes * 100) : 0;
+    $('fileProgPct').textContent = pct.toFixed(pct >= 99.95 ? 0 : 1) + '%';
+    $('fileFill').style.width = Math.min(100, pct).toFixed(1) + '%';
+    $('fileProgText').textContent = fmtBytes(d.sentBytes) + ' / ' + fmtBytes(d.totalBytes)
+      + ' · 块 ' + d.block + '/' + d.totalBlocks + (d.retries ? (' · 重传 ' + d.retries) : '');
+    $('fileRate').textContent = Math.round(d.rateBps || 0) + ' B/s' + (d.message ? (' · ' + d.message) : '');
+    return;
+  }
+  if (d.state === 'done'){
+    $('fileProgPct').textContent = '100%';
+    $('fileFill').style.width = '100%';
+    $('fileRate').textContent = '完成（重传 ' + (d.retries || 0) + ' 次）';
+    hideProgLater();
+    return;
+  }
+  if (d.state === 'error'){
+    $('fileRate').textContent = '失败：' + (d.error || '未知原因');
+    hideProgLater();   // 失败也要自动收起，不能一直挂在界面上
+  }
+}
+/** 传输结束后收起进度块（5 秒；发起页的 finally 通常已收过一次，这里是兜底） */
+function hideProgLater(){
+  setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 5000);
+}
+/** 用 XMODEM 发送：整份文件一次 POST 给服务端，进度走 SSE，取消走 /xmodem-cancel */
+async function doXmodemSend(file){
+  const mode = ($('xdMode') && $('xdMode').value) || 'auto';
+  const waitForever = !$('xdWait') || $('xdWait').checked;   // 默认一直等（直到对端回应或用户取消）
+  sending = true; sendCancelled = false; xdActive = true;
+  $('sendFileBtn').disabled = true; $('xdBtn').disabled = true;
+  $('fileProg').hidden = false;
+  renderXferProgress({ state: 'start', label: file.name, mode, totalBytes: file.size });
+  if (waitForever) $('fileRate').textContent = '等待对端握手…（一直等，点「取消发送」可停止）';
+  try{
+    const r = await fetch(tk(B + '/xmodem-send?clientId=' + encodeURIComponent(CID)
+      + '&port=' + encodeURIComponent(xferPort())
+      + '&mode=' + encodeURIComponent(mode)
+      + (waitForever ? '&retries=0&handshakeMs=0' : '')
+      + '&label=' + encodeURIComponent(file.name)),
+      { method:'POST', headers:{ 'Content-Type':'application/octet-stream' }, body: file });
+    const d = await r.json().catch(() => ({}));
+    if (sendCancelled){
+      toast('已取消传输：' + file.name, 'warn', 3000);
+      return;
+    }
+    if (!r.ok || !d.ok){
+      toast('XMODEM 传输失败：' + (d.error || ('HTTP ' + r.status)), 'err', 7000);
+      return;
+    }
+    toast('XMODEM 传输完成：' + d.sentBytes + ' 字节 · ' + (d.crc ? 'CRC16' : '8 位校验和')
+      + ' · ' + d.blockSize + 'B 块 · 重传 ' + d.retries + ' 次', 'ok', 7000);
+  }catch(e){
+    if (sendCancelled) toast('已取消传输：' + file.name, 'warn', 3000);
+    else toast('XMODEM 传输失败：' + (e && e.message ? e.message : e), 'err', 7000);
+  }finally{
+    sending = false; xdActive = false;
+    resetCancelBtn();
+    updateSendUI();
+    // 取消要"立即停"：不再等 5 秒
+    if (sendCancelled) $('fileProg').hidden = true;
+    else setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 5000);
+  }
 }
 function renderFileProgress(file, sent, t0){
   const pct = file.size ? (sent / file.size * 100) : 100;
@@ -1520,6 +1826,7 @@ async function doSendFile(file){
   $('fileProg').hidden = false;
   const t0 = Date.now();
   let sent = 0;
+  let abortNow = null;                 // 正在飞行中的那一块请求：取消要立刻打断它
   try{
     while (sent < file.size){
       if (sendCancelled){
@@ -1529,30 +1836,45 @@ async function doSendFile(file){
       const slice = file.slice(sent, Math.min(sent + chunkSize, file.size));
       const buf = await slice.arrayBuffer();
       const portParam = (cur.status && cur.status.port) || $('ps').value || '';
+      const ac = new AbortController();
+      abortNow = ac;
+      currentSendAbort = ac;
       const r = await fetch(tk(B + '/send-file?clientId=' + encodeURIComponent(CID)
         + '&port=' + encodeURIComponent(portParam)),
-        { method:'POST', headers:{ 'Content-Type':'application/octet-stream' }, body: buf });
+        { method:'POST', headers:{ 'Content-Type':'application/octet-stream' }, body: buf, signal: ac.signal });
+      abortNow = null; currentSendAbort = null;
       if (!r.ok){
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || ('HTTP ' + r.status));
       }
       sent += buf.byteLength;
       renderFileProgress(file, sent, t0);
-      if (chunkDelayMs > 0 && sent < file.size) await new Promise(res => setTimeout(res, chunkDelayMs));
+      // 块间延时也要可被打断（50ms 一片地睡，取消立即生效）
+      if (chunkDelayMs > 0 && sent < file.size){
+        for (let waited = 0; waited < chunkDelayMs && !sendCancelled; waited += 50){
+          await new Promise(res => setTimeout(res, Math.min(50, chunkDelayMs - waited)));
+        }
+      }
     }
     const dt = (Date.now() - t0) / 1000;
     const rate = Math.round(sent / Math.max(dt, 1e-3));
     toast('已发送 ' + file.name + '：' + sent + ' 字节，用时 ' + dt.toFixed(2) + ' s（' + rate + ' B/s）', 'ok', 5000);
   }catch(e){
-    toast('发送失败（已发 ' + fmtBytes(sent) + '）：' + (e && e.message ? e.message : e), 'err', 6000);
+    if (sendCancelled) toast('已取消：' + file.name + ' 已发送 ' + fmtBytes(sent), 'warn', 4000);
+    else toast('发送失败（已发 ' + fmtBytes(sent) + '）：' + (e && e.message ? e.message : e), 'err', 6000);
   }finally{
+    abortNow = null; currentSendAbort = null;
     sending = false;
+    resetCancelBtn();
     updateSendUI();   // 不能无条件 enable：发送途中若丢了控制权/断开了，按钮必须保持灰着
-    setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 4000);
+    if (sendCancelled) $('fileProg').hidden = true;   // 取消立即收起
+    else setTimeout(() => { if (!sending) $('fileProg').hidden = true; }, 4000);
   }
 }
 $('filePick').addEventListener('change', async () => {
   const f = $('filePick').files && $('filePick').files[0];
+  const viaXmodem = xdPending;
+  xdPending = false;
   $('filePick').value = '';
   if (!f) return;
   // 先体检再发：格式/地址范围/校验一目了然，严重错误必须点一次确认才发
@@ -1565,7 +1887,8 @@ $('filePick').addEventListener('change', async () => {
       '\n\n按原样发送可能被对端 bootloader 拒收，或烧进错误数据。');
     if (!go){ toast('已取消发送：' + f.name, 'warn', 3000); return; }
   }
-  await doSendFile(f);
+  if (viaXmodem) await doXmodemSend(f);
+  else await doSendFile(f);
 });
 
 // ============================ 滚动到底部 ============================

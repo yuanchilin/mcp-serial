@@ -1,29 +1,31 @@
 # ============================================================================
-# CD — 发布到 npm 官方 registry（**手动触发**）
-#   触发：Actions → Publish npm → Run workflow（dist-tag 填 latest）
-#
-# 为什么现在只保留手动触发：npm 账号当前卡在 WebAuthn 安全密钥二次验证上
-#   （必须本人在设备上按 PIN/指纹，任何自动化都替代不了），既配不了 Trusted Publisher
-#   也建不了新 token。若 tag 触发保留着，每次打 tag 都会红一条 —— 所以：
-#   日常发布走 release.yml（GitHub Release + .tgz，不需要个人凭据）；
-#   npm 凭据恢复后（配好 Trusted Publisher，或换成能用的 granular token），
-#   把下面的 `push: tags` 触发器加回来即可恢复"打 tag 即发 npm"。
+# CD — 发布到 npm 官方 registry
+#   触发：推 v* tag（自动）或 Actions → Publish npm → Run workflow（手动）
 #
 # 闸门（任一条不过就中止，绝不在没验过的情况下发布）：
 #   1. tag 名去掉 v 必须与 package.json 的 version 完全一致（tag 触发时）
-#   2. 该版本在 npm 上不能已存在
-#   3. 单元测试 + 启动自检（含版本号断言）+ 端到端 A/D 段 + 针对性检查全绿
-# 认证：**npm Trusted Publishing（OIDC）**，不使用长期 token（无 NODE_AUTH_TOKEN，
-#   改用 id-token）。前提：包 @yuanchilin/mcp-serial → Settings → Trusted Publisher →
-#   GitHub Actions：owner=yuanchilin、repository=mcp-serial、workflow filename=publish.yml。
-#   注意：trusted publishing 要求 npm CLI ≥ 11.5，故发布前显式升级 npm。
+#   2. 该版本若已在 npm 上 → 跳过发布（幂等：重推同一个 tag / 重跑工作流不会红一条）
+#   3. token 必须真的可用（`npm whoami` 先跑一遍，失败早停且错误一目了然）
+#   4. 单元测试 + 启动自检（含版本号断言）+ 端到端 A/D 段 + 针对性检查全绿
+#
+# 认证：**仓库 secret `NPM_TOKEN`**（npm Granular Access Token，需 Packages: Read and write），
+#   运行期注入为 `NODE_AUTH_TOKEN`，配合 setup-node 的 registry-url 生成
+#   `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` 使用。
+#   刻意不用 Trusted Publishing / OIDC：**本工作流没有 `id-token: write`**，
+#   GitHub 不会签发 OIDC token（2.6.1 试过 OIDC，发布步骤失败）。
+#   注意别混用：仓库里不能有残留的 `.npmrc`（尤其写死的 `_authToken` 行）——
+#   一旦 `_authToken` 被解析成空串，npm 会认为"配了认证但没值"，就不会回退到 Token 路径。
+#   `npm whoami` 那一步就是用来把这种情况直接暴露出来的。
 # 失败史：2.6.0 首次 tag 发布报 `E404 PUT .../@yuanchilin%2fmcp-serial` ——
 #   那是 NPM_TOKEN（classic token）已失效/无该 scope 写权限（npm 对 scoped 包把 403 伪装成 404），
-#   与 `--provenance` 无关。
+#   与 `--provenance` 无关；改用 granular token 后 2.6.0 发布成功（无 provenance）。
 # ============================================================================
 name: Publish npm
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -32,8 +34,7 @@ on:
         default: latest
 
 permissions:
-  contents: read    # 仅 checkout；Release 由 release.yml 负责
-  id-token: write   # npm Trusted Publishing / provenance 需要 OIDC
+  contents: read    # 仅 checkout；Release 由 release.yml 负责（不发 OIDC，故无 id-token）
 
 jobs:
   publish:
@@ -58,12 +59,31 @@ jobs:
             fi
           fi
           if npm view "@yuanchilin/mcp-serial@$V" version >/dev/null 2>&1; then
-            echo "::error::版本 $V 在 npm 上已存在，中止"
-            exit 1
+            # 幂等：该版本已经在 npm 上（重推同一个 tag / 重跑本工作流都会走到这里）——
+            # 跳过发布而不是失败：npm 本身禁止同版本覆盖，红一条没有任何意义
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::@yuanchilin/mcp-serial@$V 已在 npm 上，跳过发布步骤"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "dist_tag=${{ inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
           echo "将要发布 @yuanchilin/mcp-serial@$V（dist-tag: ${{ inputs.tag || 'latest' }}）"
+
+      - name: 验证 NPM_TOKEN 可用（缺 token / 失效 / 权限不足都在这里早停）
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::仓库没有配置 secrets.NPM_TOKEN（Settings → Secrets and variables → Actions → New repository secret）"
+            exit 1
+          fi
+          who=$(npm whoami --registry https://registry.npmjs.org) || {
+            echo "::error::NPM_TOKEN 无效或已过期/被吊销（npm whoami 失败）"
+            exit 1
+          }
+          echo "token 身份：$who"
 
       - name: 安装依赖（按 lockfile）
         run: npm ci --no-audit --no-fund
@@ -79,9 +99,9 @@ jobs:
       - name: 针对性检查
         run: npm run test:checks
 
-      - name: 升级 npm（Trusted Publishing 要求 npm CLI ≥ 11.5）
-        run: npm install -g npm@latest && npm --version
-
-      - name: 发布到 npm（Trusted Publishing / OIDC，无需 token）
-        run: npm publish --registry https://registry.npmjs.org --tag "${{ steps.guard.outputs.dist_tag }}" --provenance
+      - name: 发布到 npm（NPM_TOKEN，granular）
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --registry https://registry.npmjs.org --tag "${{ steps.guard.outputs.dist_tag }}"
 
